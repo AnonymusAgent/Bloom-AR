@@ -4,7 +4,8 @@ import { plans } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 import { requireMembership } from '@/lib/tenant';
-import { appUrl } from '@/lib/saas';
+import { appUrl, ensureDefaultPlans } from '@/lib/saas';
+import { cleanUuid } from '@/lib/sanitize';
 /**
  * Stripe Checkout — created server-side. If Stripe is not configured we return
  * an honest 503 (never fake a successful payment). Set STRIPE_SECRET_KEY and
@@ -12,8 +13,12 @@ import { appUrl } from '@/lib/saas';
  */
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const { organizationId, planSlug, interval } = await req.json();
+  const reqBody = await req.json();
+  const organizationId = cleanUuid(reqBody.organizationId);
+  const { planSlug, interval } = reqBody;
+  if (!organizationId) return NextResponse.json({ error: 'Valid organizationId required' }, { status: 400 });
   if (!await requireMembership(user.id, organizationId, ['owner','super_admin'])) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  await ensureDefaultPlans();
   const [plan] = await db.select().from(plans).where(eq(plans.slug, planSlug)).limit(1);
   if (!plan) return NextResponse.json({ error: 'Plan not found' }, { status: 404 });
   if (!process.env.STRIPE_SECRET_KEY) return NextResponse.json({ error: 'Payments are not configured yet. Add STRIPE_SECRET_KEY (and Stripe price IDs on the plan) — see docs/SAAS_SETUP.md. Your trial remains active; no charge was made.', code: 'payments_not_configured' }, { status: 503 });

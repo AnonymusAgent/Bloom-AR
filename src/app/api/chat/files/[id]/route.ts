@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { chatMessages } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { chatMessages, chatMembers } from '@/db/schema';
+import { eq, and } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -24,6 +24,16 @@ export async function GET(
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
 
+    const [membership] = await db
+      .select({ id: chatMembers.id })
+      .from(chatMembers)
+      .where(and(eq(chatMembers.channelId, message.channelId), eq(chatMembers.userId, user.id)))
+      .limit(1);
+
+    if (!membership) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     if (!message.fileData || !message.fileMimeType) {
       return NextResponse.json({ error: 'No file data' }, { status: 404 });
     }
@@ -35,7 +45,7 @@ export async function GET(
       status: 200,
       headers: {
         'Content-Type': message.fileMimeType,
-        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Content-Disposition': `attachment; filename="${fileName.replace(/"/g, '')}"`,
         'Content-Length': String(buffer.length),
       },
     });

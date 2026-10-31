@@ -24,7 +24,7 @@ export const DEFAULT_SITE_CONTENT: SiteContent = {
     { title: 'Team collaboration', description: 'Role-based access, chat, notifications, sign-offs and a complete audit trail.' },
   ],
   aboutText: 'BloomAR Manager exists to give medical practices and billing companies one organized place to work accounts receivable: see what is outstanding, assign it, work it, review it, and measure it. Our philosophy is simple — preserve the workflows billing teams actually use, isolate each organization\'s data, and be honest about what is configured versus planned.',
-  roadmapText: 'Deeper payer integrations, richer automation, and expanded reporting — released only when verified against the real backend.',
+  roadmapText: 'Richer workflow automation, clearinghouse 835/837 tooling, and expanded reporting — released only when verified against the real backend.',
   faqs: [
     { question: 'How do I create an account?', answer: 'Use Create Account, verify your email, and your organization workspace and trial are created automatically.' },
     { question: 'Can I invite my team?', answer: 'Owners and admins invite members by email with a role; invitations expire in 7 days.' },

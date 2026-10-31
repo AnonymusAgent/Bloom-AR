@@ -3,7 +3,19 @@ import { db } from '@/db';
 import { billingTasks, users, practices, taskNotes, taskDocuments, taskStatusHistory, signoffs } from '@/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { canViewUser } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
+import { cleanDate } from '@/lib/sanitize';
+
+async function canAccessTask(
+  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
+  task: typeof billingTasks.$inferSelect
+): Promise<boolean> {
+  if (isSupervisorOrAbove(user.role)) return true;
+  if (task.assignedBy === user.id) return true;
+  if (!task.assignedTo) return false;
+  return canViewUser(user, task.assignedTo);
+}
 
 export async function GET(
   request: NextRequest,
@@ -28,7 +40,7 @@ export async function GET(
     }
 
     // Check access
-    if (!isSupervisorOrAbove(user.role) && task.assignedTo !== user.id) {
+    if (!(await canAccessTask(user, task))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
@@ -158,7 +170,7 @@ export async function PATCH(
     }
 
     // Check access
-    if (!isSupervisorOrAbove(user.role) && existingTask.assignedTo !== user.id) {
+    if (!(await canAccessTask(user, existingTask))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
@@ -171,9 +183,9 @@ export async function PATCH(
     if (body.insuranceName !== undefined) updateData.insuranceName = body.insuranceName;
     if (body.authNumber !== undefined) updateData.authNumber = body.authNumber;
     if (body.referralNumber !== undefined) updateData.referralNumber = body.referralNumber;
-    if (body.serviceDate !== undefined) updateData.serviceDate = body.serviceDate;
-    if (body.expirationDate !== undefined) updateData.expirationDate = body.expirationDate;
-    if (body.dueDate !== undefined) updateData.dueDate = body.dueDate;
+    if (body.serviceDate !== undefined) updateData.serviceDate = cleanDate(body.serviceDate);
+    if (body.expirationDate !== undefined) updateData.expirationDate = cleanDate(body.expirationDate);
+    if (body.dueDate !== undefined) updateData.dueDate = cleanDate(body.dueDate);
     if (body.notes !== undefined) updateData.notes = body.notes;
     if (body.result !== undefined) updateData.result = body.result;
     if (body.priority !== undefined) updateData.priority = body.priority;

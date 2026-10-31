@@ -3,6 +3,7 @@ import { db } from '@/db';
 import { claims, practices, authorizations, billingTasks, codingRequests, auditLogs, users } from '@/db/schema';
 import { eq, and, gte, lte, ilike, or, desc, inArray, sql } from 'drizzle-orm';
 import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { cleanUuid, parseEndOfDay } from '@/lib/sanitize';
 import * as XLSX from 'xlsx';
 
 export async function GET(request: NextRequest) {
@@ -17,7 +18,8 @@ export async function GET(request: NextRequest) {
     const dateTo = sp.get('dateTo');
     const status = sp.get('status');
     const search = sp.get('search');
-    const assignedTo = sp.get('assignedTo');
+    const assignedTo = cleanUuid(sp.get('assignedTo'));
+    const endDate = dateTo ? parseEndOfDay(dateTo) : null;
 
     let rows: Record<string, unknown>[] = [];
     let fileName = entity;
@@ -27,7 +29,7 @@ export async function GET(request: NextRequest) {
       if (!isSupervisorOrAbove(user.role)) conds.push(eq(claims.assignedTo, user.id));
       if (status) conds.push(eq(claims.status, status as typeof claims.status.enumValues[number]));
       if (dateFrom) conds.push(gte(claims.createdAt, new Date(dateFrom)));
-      if (dateTo) conds.push(lte(claims.createdAt, new Date(dateTo)));
+      if (endDate) conds.push(lte(claims.createdAt, endDate));
       if (search) conds.push(or(ilike(claims.claimNumber, `%${search}%`), ilike(claims.patientName, `%${search}%`)));
       if (assignedTo) conds.push(eq(claims.assignedTo, assignedTo));
 
@@ -61,7 +63,7 @@ export async function GET(request: NextRequest) {
       if (!isSupervisorOrAbove(user.role)) conds.push(eq(authorizations.assignedTo, user.id));
       if (status) conds.push(eq(authorizations.status, status as typeof authorizations.status.enumValues[number]));
       if (dateFrom) conds.push(gte(authorizations.createdAt, new Date(dateFrom)));
-      if (dateTo) conds.push(lte(authorizations.createdAt, new Date(dateTo)));
+      if (endDate) conds.push(lte(authorizations.createdAt, endDate));
 
       const data = await db.select().from(authorizations).where(conds.length ? and(...conds) : undefined).orderBy(desc(authorizations.createdAt)).limit(5000);
       rows = data.map(r => ({
@@ -76,7 +78,7 @@ export async function GET(request: NextRequest) {
       if (!isSupervisorOrAbove(user.role)) conds.push(eq(billingTasks.assignedTo, user.id));
       if (status) conds.push(eq(billingTasks.status, status as typeof billingTasks.status.enumValues[number]));
       if (dateFrom) conds.push(gte(billingTasks.createdAt, new Date(dateFrom)));
-      if (dateTo) conds.push(lte(billingTasks.createdAt, new Date(dateTo)));
+      if (endDate) conds.push(lte(billingTasks.createdAt, endDate));
 
       const data = await db.select().from(billingTasks).where(conds.length ? and(...conds) : undefined).orderBy(desc(billingTasks.createdAt)).limit(5000);
       rows = data.map(r => ({
@@ -89,7 +91,7 @@ export async function GET(request: NextRequest) {
       if (!isSupervisorOrAbove(user.role)) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
       const conds = [];
       if (dateFrom) conds.push(gte(auditLogs.createdAt, new Date(dateFrom)));
-      if (dateTo) conds.push(lte(auditLogs.createdAt, new Date(dateTo)));
+      if (endDate) conds.push(lte(auditLogs.createdAt, endDate));
 
       const data = await db.select({
         action: auditLogs.action, entityType: auditLogs.entityType, entityId: auditLogs.entityId,

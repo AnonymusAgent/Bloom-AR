@@ -4,6 +4,7 @@ import { users } from '@/db/schema';
 import { eq, and, ilike, or, desc } from 'drizzle-orm';
 import { getCurrentUser, hashPassword, canManageUsers } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
+import { cleanUuid } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -106,7 +107,7 @@ export async function POST(request: NextRequest) {
         firstName,
         lastName,
         role,
-        teamLeadId: teamLeadId || null,
+        teamLeadId: cleanUuid(teamLeadId),
       })
       .returning();
 

@@ -14,6 +14,8 @@ export async function PATCH(req: NextRequest) {
 }
 export async function DELETE(req: NextRequest) {
   if (!await guard()) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  const { id } = await req.json(); if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+  const body = await req.json().catch(() => ({} as Record<string, string>));
+  const id = req.nextUrl.searchParams.get('id') || body.id;
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
   await db.delete(leads).where(eq(leads.id, id)); return NextResponse.json({ success: true });
 }

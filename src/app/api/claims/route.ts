@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, users, practices, claimStatusHistory } from '@/db/schema';
-import { eq, and, or, ilike, desc, asc, inArray, gte, lte, sql } from 'drizzle-orm';
+import { eq, and, or, ilike, desc, asc, inArray, gte, lte, isNull, sql } from 'drizzle-orm';
 import { getCurrentUser, canAssignClaims } from '@/lib/auth';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -23,8 +24,8 @@ export async function GET(request: NextRequest) {
     const dateTo = searchParams.get('dateTo');
     const sortBy = searchParams.get('sortBy') || 'createdAt';
     const sortOrder = searchParams.get('sortOrder') || 'desc';
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1);
-    const limit = Math.min(200, Math.max(1, parseInt(searchParams.get('limit') || '20', 10) || 20));
+    const page = cleanPage(searchParams.get('page'));
+    const limit = cleanLimit(searchParams.get('limit'), 20, 200);
 
     const conditions = [];
 
@@ -39,9 +40,12 @@ export async function GET(request: NextRequest) {
     // Admins, Supervisors, Managers see all claims
 
     // Practice filter
-    const practiceId = searchParams.get('practiceId');
-    if (practiceId) {
-      conditions.push(eq(claims.practiceId, practiceId));
+    const rawPracticeId = searchParams.get('practiceId');
+    if (rawPracticeId === 'unassigned') {
+      conditions.push(isNull(claims.practiceId));
+    } else if (rawPracticeId) {
+      const pid = cleanUuid(rawPracticeId);
+      if (pid) conditions.push(eq(claims.practiceId, pid));
     }
 
     // Search filter (claim #, patient, account #, payer/insurance, provider)
@@ -73,13 +77,30 @@ export async function GET(request: NextRequest) {
 
     // Insurance status filter
     const insuranceStatus = searchParams.get('insuranceStatus');
-    if (insuranceStatus) {
+    if (insuranceStatus === 'partial_paid') {
+      conditions.push(
+        or(
+          eq(claims.claimInsuranceStatus, 'partial_paid'),
+          and(
+            sql`COALESCE(${claims.paidAmount}::numeric, 0) > 0`,
+            sql`COALESCE(${claims.balance}::numeric, 0) > 0`
+          )
+        )!
+      );
+    } else if (insuranceStatus === 'rejected') {
+      conditions.push(
+        or(eq(claims.claimInsuranceStatus, 'rejected'), eq(claims.status, 'rework_required'))!
+      );
+    } else if (insuranceStatus) {
       conditions.push(eq(claims.claimInsuranceStatus, insuranceStatus));
     }
 
     // Assigned to filter
-    if (assignedTo) {
-      conditions.push(eq(claims.assignedTo, assignedTo));
+    if (assignedTo === 'unassigned') {
+      conditions.push(isNull(claims.assignedTo));
+    } else if (assignedTo) {
+      const aid = cleanUuid(assignedTo);
+      if (aid) conditions.push(eq(claims.assignedTo, aid));
     }
 
     // Insurance filter
@@ -229,16 +250,21 @@ export async function POST(request: NextRequest) {
       claimNumber,
       accountNumber,
       patientName,
-      dateOfService,
       cptCodes,
       provider,
       insurance,
       payer,
-      billedAmount,
-      paidAmount,
-      balance,
-      practiceId,
     } = body;
+    const dateOfService = cleanDate(body.dateOfService);
+    const practiceId = cleanUuid(body.practiceId);
+    const billedAmount = body.billedAmount !== undefined && body.billedAmount !== '' ? String(body.billedAmount) : null;
+    const paidAmount = body.paidAmount !== undefined && body.paidAmount !== '' ? String(body.paidAmount) : '0';
+    const balance =
+      body.balance !== undefined && body.balance !== ''
+        ? String(body.balance)
+        : billedAmount !== null
+        ? Math.max(0, (parseFloat(billedAmount) || 0) - (parseFloat(paidAmount) || 0)).toFixed(2)
+        : null;
 
     if (!claimNumber) {
       return NextResponse.json({ error: 'Claim number is required' }, { status: 400 });
@@ -259,17 +285,17 @@ export async function POST(request: NextRequest) {
       .insert(claims)
       .values({
         claimNumber,
-        accountNumber,
-        patientName,
+        accountNumber: accountNumber || null,
+        patientName: patientName || null,
         dateOfService,
-        cptCodes,
-        provider,
-        insurance,
-        payer,
+        cptCodes: cptCodes || null,
+        provider: provider || null,
+        insurance: insurance || null,
+        payer: payer || null,
         billedAmount,
         paidAmount,
         balance,
-        practiceId: practiceId || null,
+        practiceId,
         status: 'new',
         workflowStatus: 'unworked',
       })

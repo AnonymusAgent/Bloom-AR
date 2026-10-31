@@ -3,6 +3,7 @@ import { db } from '@/db';
 import { auditLogs, users } from '@/db/schema';
 import { eq, and, gte, lte, desc, ilike, or, sql } from 'drizzle-orm';
 import { getCurrentUser, hasPermission } from '@/lib/auth';
+import { cleanUuid, cleanPage, cleanLimit, parseEndOfDay } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,11 +16,11 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get('search');
     const action = searchParams.get('action');
     const entityType = searchParams.get('entityType');
-    const userId = searchParams.get('userId');
+    const userId = cleanUuid(searchParams.get('userId'));
     const dateFrom = searchParams.get('dateFrom');
     const dateTo = searchParams.get('dateTo');
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '50');
+    const page = cleanPage(searchParams.get('page'));
+    const limit = cleanLimit(searchParams.get('limit'), 50, 200);
 
     const conditions = [];
 
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (dateTo) {
-      conditions.push(lte(auditLogs.createdAt, new Date(dateTo)));
+      conditions.push(lte(auditLogs.createdAt, parseEndOfDay(dateTo)));
     }
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;

@@ -5,6 +5,7 @@ import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import { getCurrentUser, isSupervisorOrAbove, canReviewSignoffs } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { cleanUuid, cleanPage, cleanLimit } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -16,13 +17,13 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const status = searchParams.get('status');
     const entityType = searchParams.get('entityType');
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '20');
+    const page = cleanPage(searchParams.get('page'));
+    const limit = cleanLimit(searchParams.get('limit'), 20, 100);
 
     const conditions = [];
 
     // Role-based filtering
-    if (!isSupervisorOrAbove(user.role)) {
+    if (!canReviewSignoffs(user.role)) {
       // Regular users can only see their own signoffs
       conditions.push(eq(signoffs.submittedBy, user.id));
     }
@@ -137,11 +138,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { entityType, entityId, taskId, claimId, submissionNotes, isAutomatic } = await request.json();
+    const body = await request.json();
+    const { entityType, submissionNotes, isAutomatic } = body;
+    const entityId = cleanUuid(body.entityId);
+    const taskId = cleanUuid(body.taskId);
+    const claimId = cleanUuid(body.claimId);
 
     if (!entityType || !entityId) {
       return NextResponse.json(
-        { error: 'Entity type and ID are required' },
+        { error: 'Valid entity type and UUID are required' },
         { status: 400 }
       );
     }

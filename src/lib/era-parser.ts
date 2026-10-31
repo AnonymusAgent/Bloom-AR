@@ -24,17 +24,10 @@ export interface ParsedEra {
   transactions: EraTransaction[];
 }
 
-/**
- * Parse an 835/ERA file. Supports:
- * 1. ANSI X12 835 format (segment-delimited)
- * 2. CSV-based remittance format
- */
-export function parseEraFile(content: string, fileName: string): ParsedEra {
-  // Detect format
+export function parseEraFile(content: string, _fileName: string): ParsedEra {
   if (content.includes('ISA*') || content.includes('ISA~') || content.includes('ST*835')) {
     return parse835(content);
   }
-  // Try CSV
   if (content.includes(',') && (content.toLowerCase().includes('claim') || content.toLowerCase().includes('patient'))) {
     return parseCsvEra(content);
   }
@@ -42,13 +35,17 @@ export function parseEraFile(content: string, fileName: string): ParsedEra {
 }
 
 function parse835(content: string): ParsedEra {
-  // Determine segment terminator
   const terminator = content.includes('~') ? '~' : '\n';
-  const segments = content.split(terminator).map(s => s.trim()).filter(Boolean);
+  const segments = content.split(terminator).map((s) => s.trim()).filter(Boolean);
 
-  let payerName = '', paymentDate = '', checkNumber = '', totalPayment = 0;
+  let payerName = '',
+    paymentDate = '',
+    checkNumber = '',
+    totalPayment = 0;
   const transactions: EraTransaction[] = [];
   let currentTx: Partial<EraTransaction> = {};
+  let hasClpAmounts = false;
+  let cpts: string[] = [];
 
   for (const seg of segments) {
     const elements = seg.split('*');
@@ -57,69 +54,89 @@ function parse835(content: string): ParsedEra {
     if (segId === 'N1' && elements[1] === 'PR') {
       payerName = elements[2] || '';
     } else if (segId === 'BPR') {
-      totalPayment = parseFloat(elements[2] || '0');
+      totalPayment = parseFloat(elements[2] || '0') || 0;
       paymentDate = formatDate(elements[16] || '');
     } else if (segId === 'TRN') {
       checkNumber = elements[2] || '';
     } else if (segId === 'CLP') {
-      // Save previous transaction
-      if (currentTx.claimNumber) transactions.push(fillDefaults(currentTx));
+      if (currentTx.claimNumber) {
+        if (cpts.length > 0) currentTx.cptCode = cpts.join(', ');
+        transactions.push(fillDefaults(currentTx));
+      }
+      const clpBilled = parseFloat(elements[3] || '0') || 0;
+      const clpPaid = parseFloat(elements[4] || '0') || 0;
+      hasClpAmounts = Boolean(elements[3] || elements[4]);
+      cpts = [];
       currentTx = {
         claimNumber: elements[1] || '',
         patientName: '',
-        billedAmount: parseFloat(elements[3] || '0'),
-        paidAmount: parseFloat(elements[4] || '0'),
+        billedAmount: clpBilled,
+        paidAmount: clpPaid,
       };
     } else if (segId === 'NM1' && elements[1] === 'QC') {
       currentTx.patientName = `${elements[3] || ''} ${elements[4] || ''}`.trim();
-    } else if (segId === 'DTM' && elements[1] === '232') {
-      currentTx.dateOfService = formatDate(elements[2] || '');
+    } else if (segId === 'DTM' && (elements[1] === '232' || elements[1] === '472')) {
+      const rawDate = elements[2] === 'D8' ? elements[3] || '' : elements[2] || '';
+      const formatted = formatDate(rawDate);
+      if (formatted && !currentTx.dateOfService) currentTx.dateOfService = formatted;
     } else if (segId === 'SVC') {
       const codeInfo = (elements[1] || '').split(':');
-      currentTx.cptCode = codeInfo[1] || codeInfo[0] || '';
-      currentTx.billedAmount = parseFloat(elements[2] || '0');
-      currentTx.paidAmount = parseFloat(elements[3] || '0');
+      const cpt = codeInfo[1] || codeInfo[0] || '';
+      if (cpt && !cpts.includes(cpt)) cpts.push(cpt);
+      if (!hasClpAmounts) {
+        currentTx.billedAmount = (currentTx.billedAmount || 0) + (parseFloat(elements[2] || '0') || 0);
+        currentTx.paidAmount = (currentTx.paidAmount || 0) + (parseFloat(elements[3] || '0') || 0);
+      }
     } else if (segId === 'CAS') {
       const group = elements[1] || '';
-      const amount = parseFloat(elements[3] || '0');
-      if (group === 'CO') currentTx.contractualAdjustment = (currentTx.contractualAdjustment || 0) + amount;
-      else if (group === 'PR') currentTx.patientResponsibility = (currentTx.patientResponsibility || 0) + amount;
-      else if (group === 'OA') currentTx.otherAdjustment = (currentTx.otherAdjustment || 0) + amount;
-      currentTx.carcCode = elements[2] || currentTx.carcCode || '';
+      // X12 835 CAS can have up to 6 adjustment triplets: (reason, amount, qty) starting at index 2
+      for (let idx = 2; idx + 1 < elements.length; idx += 3) {
+        const reason = elements[idx] || '';
+        const amount = parseFloat(elements[idx + 1] || '0') || 0;
+        if (!reason && amount === 0) break;
+        if (group === 'CO') currentTx.contractualAdjustment = (currentTx.contractualAdjustment || 0) + amount;
+        else if (group === 'PR') currentTx.patientResponsibility = (currentTx.patientResponsibility || 0) + amount;
+        else currentTx.otherAdjustment = (currentTx.otherAdjustment || 0) + amount;
+        if (reason && !currentTx.carcCode) currentTx.carcCode = reason;
+      }
     } else if (segId === 'LQ') {
-      if (elements[1] === 'HE') currentTx.rarcCode = elements[2] || '';
+      if (elements[1] === 'HE') currentTx.rarcCode = elements[2] || currentTx.rarcCode || '';
     }
   }
 
-  // Save last transaction
-  if (currentTx.claimNumber) transactions.push(fillDefaults(currentTx));
+  if (currentTx.claimNumber) {
+    if (cpts.length > 0) currentTx.cptCode = cpts.join(', ');
+    transactions.push(fillDefaults(currentTx));
+  }
 
   return { payerName, paymentDate, checkNumber, totalPayment, transactions };
 }
 
 function parseCsvEra(content: string): ParsedEra {
-  const lines = content.split(/\r?\n/).filter(l => l.trim());
+  const lines = content.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) throw new Error('ERA CSV file is empty or has no data rows');
 
-  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z0-9]/g, '_'));
+  const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, '_'));
   const transactions: EraTransaction[] = [];
 
   for (let i = 1; i < lines.length; i++) {
-    const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+    const values = lines[i].split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
     const row: Record<string, string> = {};
-    headers.forEach((h, j) => { row[h] = values[j] || ''; });
+    headers.forEach((h, j) => {
+      row[h] = values[j] || '';
+    });
 
     transactions.push({
       claimNumber: row.claim_number || row.claim_ || row.claim_id || row.claimno || '',
       patientName: row.patient_name || row.patient || row.member_name || '',
-      dateOfService: row.date_of_service || row.dos || row.service_date || '',
+      dateOfService: formatDate(row.date_of_service || row.dos || row.service_date || ''),
       cptCode: row.cpt_code || row.cpt || row.procedure_code || '',
-      billedAmount: parseFloat(row.billed_amount || row.billed || row.charges || '0'),
-      allowedAmount: parseFloat(row.allowed_amount || row.allowed || '0'),
-      paidAmount: parseFloat(row.paid_amount || row.paid || row.payment || '0'),
-      contractualAdjustment: parseFloat(row.contractual_adjustment || row.adjustment || '0'),
-      patientResponsibility: parseFloat(row.patient_responsibility || row.patient_resp || '0'),
-      otherAdjustment: parseFloat(row.other_adjustment || '0'),
+      billedAmount: parseFloat(row.billed_amount || row.billed || row.charges || '0') || 0,
+      allowedAmount: parseFloat(row.allowed_amount || row.allowed || '0') || 0,
+      paidAmount: parseFloat(row.paid_amount || row.paid || row.payment || '0') || 0,
+      contractualAdjustment: parseFloat(row.contractual_adjustment || row.adjustment || '0') || 0,
+      patientResponsibility: parseFloat(row.patient_responsibility || row.patient_resp || '0') || 0,
+      otherAdjustment: parseFloat(row.other_adjustment || '0') || 0,
       carcCode: row.carc_code || row.carc || row.denial_code || '',
       rarcCode: row.rarc_code || row.rarc || '',
       remarkText: row.remark || row.remarks || row.notes || '',
@@ -131,9 +148,20 @@ function parseCsvEra(content: string): ParsedEra {
 }
 
 function formatDate(d: string): string {
-  if (!d || d.length < 8) return d;
-  if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
-  return d;
+  const trimmed = (d || '').trim();
+  if (!trimmed) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  if (/^\d{8}$/.test(trimmed)) {
+    return `${trimmed.slice(0, 4)}-${trimmed.slice(4, 6)}-${trimmed.slice(6, 8)}`;
+  }
+  const mdy = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (mdy) {
+    const mm = mdy[1].padStart(2, '0');
+    const dd = mdy[2].padStart(2, '0');
+    const yyyy = mdy[3].length === 2 ? `20${mdy[3]}` : mdy[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return '';
 }
 
 function fillDefaults(tx: Partial<EraTransaction>): EraTransaction {

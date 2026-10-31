@@ -1,20 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, authorizations, billingTasks, codingRequests, users, signoffs } from '@/db/schema';
-import { eq, and, gte, lte, sql, inArray, desc } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { eq, and, gte, lte, lt, sql, inArray, desc } from 'drizzle-orm';
+import { getCurrentUser, canViewReports } from '@/lib/auth';
+import { parseEndOfDay } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
     const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user || !canViewReports(user.role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: user ? 403 : 401 });
+    }
 
     const sp = request.nextUrl.searchParams;
     const dateFrom = sp.get('dateFrom') || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = sp.get('dateTo') || new Date().toISOString().split('T')[0];
 
     const fromDate = new Date(dateFrom);
-    const toDate = new Date(dateTo + 'T23:59:59');
+    const toDate = parseEndOfDay(dateTo);
 
     // === CLAIMS KPIs ===
     const claimDateCond = and(gte(claims.createdAt, fromDate), lte(claims.createdAt, toDate));
@@ -66,17 +69,30 @@ export async function GET(request: NextRequest) {
     }));
     userPerformance.sort((a, b) => b.claimsCompleted - a.claimsCompleted);
 
-    // === AGING BUCKETS ===
+    // === AGING BUCKETS (non-overlapping, aged from DOS or created_at across all open unpaid claims) ===
     const now = new Date();
     const d30 = new Date(now); d30.setDate(d30.getDate() - 30);
     const d60 = new Date(now); d60.setDate(d60.getDate() - 60);
     const d90 = new Date(now); d90.setDate(d90.getDate() - 90);
-    const openStatuses: Array<typeof claims.status.enumValues[number]> = ['new', 'assigned', 'in_progress', 'pending', 'submitted_for_review'];
+    const openStatuses: Array<typeof claims.status.enumValues[number]> = [
+      'new',
+      'assigned',
+      'in_progress',
+      'pending',
+      'submitted_for_review',
+      'rework_required',
+      'sent_to_coding',
+      'coding_review',
+      'coding_corrected',
+      'returned_to_billing',
+      'resubmitted',
+    ];
+    const ageTimestamp = sql`COALESCE(${claims.dateOfService}::timestamp, ${claims.createdAt})`;
 
-    const [a0_30] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(claims.createdAt, d30), inArray(claims.status, openStatuses)));
-    const [a31_60] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(claims.createdAt, d60), lte(claims.createdAt, d30), inArray(claims.status, openStatuses)));
-    const [a61_90] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(claims.createdAt, d90), lte(claims.createdAt, d60), inArray(claims.status, openStatuses)));
-    const [a90plus] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(lte(claims.createdAt, d90), inArray(claims.status, openStatuses)));
+    const [a0_30] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(ageTimestamp, d30), inArray(claims.status, openStatuses)));
+    const [a31_60] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(ageTimestamp, d60), lt(ageTimestamp, d30), inArray(claims.status, openStatuses)));
+    const [a61_90] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(gte(ageTimestamp, d90), lt(ageTimestamp, d60), inArray(claims.status, openStatuses)));
+    const [a90plus] = await db.select({ count: sql<number>`count(*)::int`, total: sql<string>`COALESCE(SUM(balance::numeric),0)::text` }).from(claims).where(and(lt(ageTimestamp, d90), inArray(claims.status, openStatuses)));
 
     return NextResponse.json({
       dateRange: { from: dateFrom, to: dateTo },

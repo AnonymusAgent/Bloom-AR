@@ -9,7 +9,7 @@ import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import {
-  ArrowLeft, Save, Upload, FileText, Clock, User, CheckCircle, Send,
+  ArrowLeft, Save, Upload, FileText, Clock, User, CheckCircle, Send, Download,
 } from 'lucide-react';
 
 interface TaskDetail {
@@ -412,6 +412,14 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                     <Badge variant={doc.status === 'approved' ? 'success' : doc.status === 'rejected' ? 'danger' : 'default'} size="sm">
                       {doc.status}
                     </Badge>
+                    <a
+                      href={`/api/tasks/${resolvedParams.id}/documents/${doc.id}`}
+                      download={doc.fileName}
+                      className="p-1.5 text-slate-500 hover:text-blue-600 rounded"
+                      title="Download document"
+                    >
+                      <Download className="w-4 h-4" />
+                    </a>
                   </div>
                 ))}
               </div>

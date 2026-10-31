@@ -4,6 +4,7 @@ import { users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { getCurrentUser, hashPassword, canManageUsers } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
+import { cleanUuid } from '@/lib/sanitize';
 
 export async function GET(
   request: NextRequest,
@@ -70,12 +71,19 @@ export async function PATCH(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    if (id === currentUser.id && (body.isActive === false || (body.role && body.role !== 'administrator'))) {
+      return NextResponse.json(
+        { error: 'You cannot deactivate or demote your own administrator account.' },
+        { status: 400 }
+      );
+    }
+
     const updateData: Partial<typeof users.$inferInsert> = {};
 
     if (body.firstName) updateData.firstName = body.firstName;
     if (body.lastName) updateData.lastName = body.lastName;
     if (body.role) updateData.role = body.role;
-    if (body.teamLeadId !== undefined) updateData.teamLeadId = body.teamLeadId;
+    if (body.teamLeadId !== undefined) updateData.teamLeadId = cleanUuid(body.teamLeadId);
     if (body.isActive !== undefined) updateData.isActive = body.isActive;
     if (body.password) {
       updateData.passwordHash = await hashPassword(body.password);

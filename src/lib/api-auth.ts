@@ -27,6 +27,7 @@ export async function authenticateApiKey(request: NextRequest) {
 
       // Get the user who created this key
       const [user] = await db.select().from(users).where(eq(users.id, candidate.createdBy)).limit(1);
+      if (!user || !user.isActive || user.accountStatus === 'suspended') continue;
       return { apiKey: candidate, user };
     }
   }

@@ -13,19 +13,19 @@ export async function GET() {
 
     // Build condition based on user role
     let userCondition;
-    
-    if (user.role === 'ar_executive') {
+
+    if (user.role === 'ar_executive' || user.role === 'billing_user') {
       userCondition = eq(claims.assignedTo, user.id);
-    } else if (user.role === 'team_lead') {
+    } else if (user.role === 'team_lead' || user.role === 'senior_lead') {
       const teamMembers = await db
         .select({ id: users.id })
         .from(users)
         .where(eq(users.teamLeadId, user.id));
-      
-      const teamMemberIds = [user.id, ...teamMembers.map(m => m.id)];
+
+      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.id)];
       userCondition = inArray(claims.assignedTo, teamMemberIds);
     }
-    // For manager, senior_lead, administrator - no condition (see all)
+    // For manager, supervisor, administrator - no condition (see all)
 
     // Get claims by status
     const statusCounts = await db
@@ -84,7 +84,7 @@ export async function GET() {
     // Get claims by assignee (for managers/leads)
     let claimsByAssignee: Array<{ userId: string; userName: string; count: number }> = [];
     
-    if (['administrator', 'manager', 'senior_lead', 'team_lead'].includes(user.role)) {
+    if (['administrator', 'supervisor', 'manager', 'senior_lead', 'team_lead'].includes(user.role)) {
       const assigneeStats = await db
         .select({
           assignedTo: claims.assignedTo,

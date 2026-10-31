@@ -43,6 +43,13 @@ export async function POST(
       );
     }
 
+    if (signoff.submittedBy === user.id && user.role !== 'administrator') {
+      return NextResponse.json(
+        { error: 'Self-approval is not permitted. Another lead or supervisor must review this sign-off.' },
+        { status: 403 }
+      );
+    }
+
     const newStatus = action === 'approve' ? 'approved' : 'rejected';
 
     const [updatedSignoff] = await db
@@ -84,7 +91,8 @@ export async function POST(
 
     if (signoff.claimId) {
       const newClaimStatus = action === 'approve' ? 'approved' : 'rework_required';
-      
+      const newWorkflowStatus = action === 'approve' ? 'approved' : 'rework';
+
       const [claim] = await db
         .select()
         .from(claims)
@@ -94,7 +102,14 @@ export async function POST(
       if (claim) {
         await db
           .update(claims)
-          .set({ status: newClaimStatus, updatedAt: new Date() })
+          .set({
+            status: newClaimStatus,
+            workflowStatus: newWorkflowStatus,
+            ...(action === 'approve'
+              ? { approvedBy: user.id, approvedAt: new Date() }
+              : { reworkReason: reviewNotes || 'Sign-off rejected', reworkCount: (claim.reworkCount || 0) + 1 }),
+            updatedAt: new Date(),
+          })
           .where(eq(claims.id, signoff.claimId));
 
         await db.insert(claimStatusHistory).values({
@@ -102,7 +117,7 @@ export async function POST(
           previousStatus: claim.status,
           newStatus: newClaimStatus,
           changedBy: user.id,
-          reason: `Signoff ${action}d`,
+          reason: `Signoff ${action}d${reviewNotes ? `: ${reviewNotes}` : ''}`,
         });
       }
     }

@@ -1,9 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { denialCodes } from '@/db/schema';
-import { eq, ilike, or, and, desc } from 'drizzle-orm';
+import { eq, ilike, or, and, sql } from 'drizzle-orm';
 import { getCurrentUser, canManageUsers } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
+import { ALL_DENIAL_CODES } from '@/lib/denial-codes-data';
+
+async function ensureBuiltinDenialCodes(): Promise<void> {
+  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(denialCodes);
+  if (count > 0) return;
+  const seen = new Set<string>();
+  const batch = [];
+  for (const c of ALL_DENIAL_CODES) {
+    if (seen.has(c.code)) continue;
+    seen.add(c.code);
+    batch.push({
+      code: c.code,
+      codeType: c.codeType,
+      description: c.description,
+      category: c.category,
+    });
+  }
+  if (batch.length > 0) {
+    await db.insert(denialCodes).values(batch).onConflictDoNothing();
+  }
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -11,6 +32,8 @@ export async function GET(request: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    await ensureBuiltinDenialCodes();
 
     const searchParams = request.nextUrl.searchParams;
     const search = searchParams.get('search');

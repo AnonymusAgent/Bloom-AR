@@ -67,7 +67,6 @@ const ICON_MAP: Record<NavIconKey, React.ElementType> = {
   ai: Brain,
   ocr: ScanLine,
   signatures: PenTool,
-  portals: Globe,
   patients: UserCircle,
   payments: CreditCard,
   era: FileDown,

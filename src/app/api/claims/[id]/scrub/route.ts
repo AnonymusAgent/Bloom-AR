@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { getUserAuthorizedPracticeIds, canViewUser } from '@/lib/rbac';
 
 interface ScrubResult { ruleId: string; ruleName: string; category: string; severity: 'error' | 'warning'; field: string; message: string; }
 
@@ -52,6 +53,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const [claim] = await db.select().from(claims).where(eq(claims.id, id)).limit(1);
     if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
+
+    if (!isSupervisorOrAbove(user.role)) {
+      const authPractices = await getUserAuthorizedPracticeIds(user);
+      const allowedByPractice =
+        authPractices === 'all' || (claim.practiceId ? authPractices.includes(claim.practiceId) : false);
+      const allowedByAssignee = claim.assignedTo ? await canViewUser(user, claim.assignedTo) : false;
+      if (!allowedByPractice && !allowedByAssignee) {
+        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+      }
+    }
 
     const results = scrubClaim(claim as Record<string, unknown>);
     const errors = results.filter(r => r.severity === 'error');

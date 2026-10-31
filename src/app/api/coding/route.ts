@@ -9,10 +9,12 @@ import {
   claimDocuments,
   claimStatusHistory,
 } from '@/db/schema';
-import { eq, and, desc, inArray, sql } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { eq, and, desc, inArray, or, sql } from 'drizzle-orm';
+import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { getUserAuthorizedPracticeIds, getUserAuthorizedUserIds } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { cleanUuid } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -34,10 +36,28 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    if (!isSupervisorOrAbove(user.role)) {
+      const authPractices = await getUserAuthorizedPracticeIds(user);
+      const authUsers = await getUserAuthorizedUserIds(user);
+      const vis = [];
+      if (authUsers !== 'all' && authUsers.length > 0) {
+        vis.push(inArray(codingRequests.sentBy, authUsers));
+        vis.push(inArray(codingRequests.assignedTo, authUsers));
+      }
+      if (authPractices !== 'all' && authPractices.length > 0) {
+        vis.push(inArray(claims.practiceId, authPractices));
+      }
+      if (vis.length === 0) {
+        return NextResponse.json({ codingRequests: [], pagination: { page, limit, total: 0, totalPages: 1 } });
+      }
+      conditions.push(or(...vis)!);
+    }
+
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(codingRequests)
+      .leftJoin(claims, eq(codingRequests.claimId, claims.id))
       .where(whereClause);
 
     const rows = await db
@@ -110,8 +130,11 @@ export async function POST(request: NextRequest) {
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const { claimId, denialReason, comments, assignedTo } = await request.json();
-    if (!claimId) return NextResponse.json({ error: 'Claim ID required' }, { status: 400 });
+    const body = await request.json();
+    const claimId = cleanUuid(body.claimId);
+    const assignedTo = cleanUuid(body.assignedTo);
+    const { denialReason, comments } = body;
+    if (!claimId) return NextResponse.json({ error: 'Valid Claim ID required' }, { status: 400 });
 
     const [claim] = await db.select().from(claims).where(eq(claims.id, claimId)).limit(1);
     if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });

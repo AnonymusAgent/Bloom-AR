@@ -13,6 +13,7 @@ import { eq, desc, inArray } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { ensureSaaSColumns, safeErrorDetail } from '@/lib/db-schema';
+import { cleanUuid, cleanDate } from '@/lib/sanitize';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -332,23 +333,30 @@ export async function PATCH(
     }
 
     // Update allowed fields
-    if (body.patientName !== undefined) updateData.patientName = body.patientName;
-    if (body.accountNumber !== undefined) updateData.accountNumber = body.accountNumber;
-    if (body.dateOfService !== undefined) updateData.dateOfService = body.dateOfService;
-    if (body.cptCodes !== undefined) updateData.cptCodes = body.cptCodes;
-    if (body.diagnosisCode !== undefined) updateData.diagnosisCode = body.diagnosisCode;
-    if (body.location !== undefined) updateData.location = body.location;
-    if (body.provider !== undefined) updateData.provider = body.provider;
-    if (body.insurance !== undefined) updateData.insurance = body.insurance;
-    if (body.payer !== undefined) updateData.payer = body.payer;
-    if (body.billedAmount !== undefined) updateData.billedAmount = body.billedAmount;
-    if (body.paidAmount !== undefined) updateData.paidAmount = body.paidAmount;
-    if (body.balance !== undefined) updateData.balance = body.balance;
+    if (body.patientName !== undefined) updateData.patientName = body.patientName || null;
+    if (body.accountNumber !== undefined) updateData.accountNumber = body.accountNumber || null;
+    if (body.dateOfService !== undefined) updateData.dateOfService = cleanDate(body.dateOfService);
+    if (body.cptCodes !== undefined) updateData.cptCodes = body.cptCodes || null;
+    if (body.diagnosisCode !== undefined) updateData.diagnosisCode = body.diagnosisCode || null;
+    if (body.location !== undefined) updateData.location = body.location || null;
+    if (body.provider !== undefined) updateData.provider = body.provider || null;
+    if (body.insurance !== undefined) updateData.insurance = body.insurance || null;
+    if (body.payer !== undefined) updateData.payer = body.payer || null;
+    if (body.billedAmount !== undefined) updateData.billedAmount = body.billedAmount !== '' && body.billedAmount !== null ? String(body.billedAmount) : null;
+    if (body.paidAmount !== undefined) updateData.paidAmount = body.paidAmount !== '' && body.paidAmount !== null ? String(body.paidAmount) : '0';
+    if (body.balance !== undefined) updateData.balance = body.balance !== '' && body.balance !== null ? String(body.balance) : null;
     if (body.priority !== undefined) updateData.priority = body.priority;
-    if (body.subStatus !== undefined) updateData.subStatus = body.subStatus;
-    if (body.followUpDate !== undefined) updateData.followUpDate = body.followUpDate || null;
-    if (body.denialCodeId !== undefined) updateData.denialCodeId = body.denialCodeId;
-    if (body.denialReason !== undefined) updateData.denialReason = body.denialReason;
+    if (body.subStatus !== undefined) updateData.subStatus = body.subStatus || null;
+    if (body.claimInsuranceStatus !== undefined) updateData.claimInsuranceStatus = body.claimInsuranceStatus || null;
+    if (body.followUpDate !== undefined) updateData.followUpDate = cleanDate(body.followUpDate);
+    if (body.denialCodeId !== undefined) {
+      const parsed = Number(body.denialCodeId);
+      updateData.denialCodeId =
+        body.denialCodeId !== '' && body.denialCodeId !== null && Number.isInteger(parsed) && parsed > 0
+          ? parsed
+          : null;
+    }
+    if (body.denialReason !== undefined) updateData.denialReason = body.denialReason || null;
 
     // Status change + workflowStatus synchronization
     if (body.status && body.status !== existingClaim.status) {

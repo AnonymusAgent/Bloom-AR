@@ -22,7 +22,6 @@ export type NavIconKey =
   | 'ai'
   | 'ocr'
   | 'signatures'
-  | 'portals'
   | 'patients'
   | 'payments'
   | 'era'
@@ -205,14 +204,6 @@ export const SIDEBAR_NAV_ITEMS: SidebarNavItem[] = [
     label: 'E-Signatures',
     roles: ALL_ROLES,
     keywords: ['e-signatures', 'electronic signature', 'sign document', 'consent'],
-  },
-  {
-    id: 'payer-portals',
-    href: '/payer-portals',
-    icon: 'portals',
-    label: 'Payer Portals',
-    roles: ADMIN_ROLES,
-    keywords: ['payer portals', 'insurance portals', 'eligibility', 'claim status check', 'clearinghouse'],
   },
   {
     id: 'patients',
