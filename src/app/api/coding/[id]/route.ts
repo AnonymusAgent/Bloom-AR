@@ -37,12 +37,19 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (body.status && claimStatusMap[body.status]) {
       const [claim] = await db.select().from(claims).where(eq(claims.id, existing.claimId)).limit(1);
       if (claim) {
-        await db.update(claims).set({ status: claimStatusMap[body.status] as typeof claim.status, updatedAt: new Date() }).where(eq(claims.id, existing.claimId));
-        await db.insert(claimStatusHistory).values({ claimId: existing.claimId, previousStatus: claim.status, newStatus: claimStatusMap[body.status] as typeof claim.status, changedBy: user.id, reason: `Coding: ${body.status}` });
+        const claimUpdate: Record<string, unknown> = {
+          status: claimStatusMap[body.status] as typeof claim.status,
+          updatedAt: new Date(),
+        };
+        if (body.status === 'corrected' || body.status === 'returned_to_billing') {
+          claimUpdate.workflowStatus = 'working';
+        }
+        await db.update(claims).set(claimUpdate).where(eq(claims.id, existing.claimId));
+        await db.insert(claimStatusHistory).values({ claimId: existing.claimId, previousStatus: claim.status, newStatus: claimStatusMap[body.status] as typeof claim.status, changedBy: user.id, reason: `Coding: ${body.status}${body.correctionNotes ? ` — ${body.correctionNotes}` : ''}` });
       }
       // Notify sender
       if (existing.sentBy && existing.sentBy !== user.id) {
-        await createNotification({ userId: existing.sentBy, type: 'system', title: 'Coding Update', message: `Coding request status: ${body.status.replace('_', ' ')}` });
+        await createNotification({ userId: existing.sentBy, type: 'system', title: 'Coding Update', message: `Coding request status: ${body.status.replace('_', ' ')}`, relatedClaimId: existing.claimId });
       }
     }
 

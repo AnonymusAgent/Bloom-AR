@@ -90,6 +90,12 @@ export default function UploadPage() {
   const [practices, setPractices] = useState<Practice[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedPractice, setSelectedPractice] = useState('');
+  const [allowUnlinkedPractice, setAllowUnlinkedPractice] = useState(false);
+  const [showQuickPractice, setShowQuickPractice] = useState(false);
+  const [newPracticeName, setNewPracticeName] = useState('');
+  const [newPracticeCode, setNewPracticeCode] = useState('');
+  const [newPracticeSpecialty, setNewPracticeSpecialty] = useState('');
+  const [creatingPractice, setCreatingPractice] = useState(false);
   const [providerOverride, setProviderOverride] = useState('');
   const [assignedUser, setAssignedUser] = useState('');
 
@@ -101,6 +107,7 @@ export default function UploadPage() {
     recordsProcessed?: number;
     skippedRows?: number;
     duplicatesInFile?: number;
+    practice?: { id: string; name: string; code: string } | null;
     warnings?: string[];
     error?: string;
   } | null>(null);
@@ -265,6 +272,7 @@ export default function UploadPage() {
         recordsProcessed: data.recordsProcessed,
         skippedRows: data.skippedRows,
         duplicatesInFile: data.duplicatesInFile,
+        practice: data.practice || null,
         warnings: data.warnings,
       });
       setStep('completed');
@@ -280,11 +288,47 @@ export default function UploadPage() {
     }
   };
 
+  const handleQuickCreatePractice = async () => {
+    if (!newPracticeName.trim() || !newPracticeCode.trim()) return;
+    setCreatingPractice(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch('/api/practices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          name: newPracticeName.trim(),
+          code: newPracticeCode.trim().toUpperCase(),
+          specialty: newPracticeSpecialty.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setErrorMessage(data.error || 'Failed to create practice.');
+        return;
+      }
+      const created: Practice = data.practice;
+      setPractices((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setSelectedPractice(created.id);
+      setAllowUnlinkedPractice(false);
+      setShowQuickPractice(false);
+      setNewPracticeName('');
+      setNewPracticeCode('');
+      setNewPracticeSpecialty('');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to create practice.');
+    } finally {
+      setCreatingPractice(false);
+    }
+  };
+
   const resetForm = () => {
     setSelectedFile(null);
     setInspection(null);
     setColumnMapping({});
     setSelectedPractice('');
+    setAllowUnlinkedPractice(false);
     setProviderOverride('');
     setAssignedUser('');
     setImportResult(null);
@@ -726,12 +770,60 @@ export default function UploadPage() {
 
             <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Target Practice *
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-slate-700">
+                    Target Practice *
+                  </label>
+                  {currentUser && ['administrator', 'supervisor', 'manager'].includes(currentUser.role) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowQuickPractice((v) => !v)}
+                      className="text-xs font-semibold text-[#2563EB] hover:underline"
+                    >
+                      {showQuickPractice ? 'Cancel' : '+ Create New Practice'}
+                    </button>
+                  )}
+                </div>
+
+                {showQuickPractice && (
+                  <div className="mb-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                    <p className="text-xs font-semibold text-slate-700">Quick Create Medical Practice</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <Input
+                        value={newPracticeCode}
+                        onChange={(e) => setNewPracticeCode(e.target.value)}
+                        placeholder="Code (e.g. SUNRISE)"
+                      />
+                      <Input
+                        value={newPracticeName}
+                        onChange={(e) => setNewPracticeName(e.target.value)}
+                        placeholder="Practice Name *"
+                      />
+                      <Input
+                        value={newPracticeSpecialty}
+                        onChange={(e) => setNewPracticeSpecialty(e.target.value)}
+                        placeholder="Specialty (optional)"
+                      />
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        onClick={handleQuickCreatePractice}
+                        loading={creatingPractice}
+                        disabled={!newPracticeName.trim() || !newPracticeCode.trim()}
+                      >
+                        Save & Select Practice
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 <select
                   value={selectedPractice}
-                  onChange={(e) => setSelectedPractice(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedPractice(e.target.value);
+                    if (e.target.value) setAllowUnlinkedPractice(false);
+                  }}
                   className="w-full px-3.5 py-2.5 rounded-lg border border-[#E5E7EB] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]/20 focus:border-[#2563EB]"
                   required
                 >
@@ -743,8 +835,20 @@ export default function UploadPage() {
                   ))}
                 </select>
                 <p className="text-xs text-slate-400 mt-1">
-                  Claims will be cataloged under this practice for AR aging and collection tracking.
+                  Claims will be linked to this practice across Claims, Work Queue, Review, and Reports.
                 </p>
+
+                {!selectedPractice && currentUser?.role === 'administrator' && (
+                  <label className="mt-2 inline-flex items-center gap-2 text-xs text-amber-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowUnlinkedPractice}
+                      onChange={(e) => setAllowUnlinkedPractice(e.target.checked)}
+                      className="rounded border-slate-300"
+                    />
+                    Import without linking to a practice (Administrator override)
+                  </label>
+                )}
               </div>
 
               <div>
@@ -824,7 +928,7 @@ export default function UploadPage() {
                 </Button>
                 <Button
                   onClick={handleFinalImport}
-                  disabled={!selectedPractice && currentUser?.role !== 'administrator'}
+                  disabled={!selectedPractice && !(currentUser?.role === 'administrator' && allowUnlinkedPractice)}
                 >
                   Confirm & Import Claims <ArrowRight className="w-4 h-4 ml-2" />
                 </Button>
@@ -874,7 +978,11 @@ export default function UploadPage() {
                   </h3>
                   <p className="text-xs text-slate-600 mt-1 max-w-lg mx-auto">
                     {importResult.success
-                      ? `Successfully parsed and recorded ${importResult.recordsProcessed} claim(s) from "${selectedFile?.name}".`
+                      ? `Successfully parsed and recorded ${importResult.recordsProcessed} claim(s) from "${selectedFile?.name}"${
+                          importResult.practice
+                            ? ` under ${importResult.practice.code} — ${importResult.practice.name}`
+                            : ''
+                        }.`
                       : importResult.error}
                   </p>
 

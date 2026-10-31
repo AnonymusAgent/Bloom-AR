@@ -13,6 +13,7 @@ interface Claim {
   insurance: string | null; provider: string | null; balance: string | null; status: string;
   priority: string | null; subStatus: string | null; workflowStatus: string | null;
   claimInsuranceStatus: string | null; assigneeName: string | null; approvedByName: string | null;
+  practiceId: string | null; practiceName: string | null; practiceCode: string | null;
   workedDate: string | null; followUpDate: string | null; reworkReason: string | null;
   reworkCount: number | null; createdAt: string;
 }
@@ -96,11 +97,12 @@ export default function ClaimsPage() {
   // Fetch counts for badges
   const fetchCounts = useCallback(async () => {
     try {
-      const res = await fetch('/api/claims/counts', { credentials: 'include' });
+      const qs = practiceFilter ? `?practiceId=${encodeURIComponent(practiceFilter)}` : '';
+      const res = await fetch(`/api/claims/counts${qs}`, { credentials: 'include' });
       const d = await res.json();
       if (res.ok) setCounts(d);
     } catch {}
-  }, []);
+  }, [practiceFilter]);
 
   const fetchClaims = useCallback(async () => {
     setLoading(true);
@@ -162,17 +164,12 @@ export default function ClaimsPage() {
     { key: 'details', label: 'Details', count: 0, icon: BarChart3 },
   ];
 
-  // If "details" tab is selected, redirect to productivity page
-  if (mainTab === 'details') {
-    router.push('/productivity');
-  }
-
   return (
     <AppLayout title="Account Receivable">
       {/* Main Tabs */}
       <div className="flex items-center gap-1 mb-4 overflow-x-auto pb-1">
         {mainTabs.map(t => (
-          <button key={t.key} onClick={() => setMainTab(t.key)}
+          <button key={t.key} onClick={() => t.key === 'details' ? router.push('/productivity') : setMainTab(t.key)}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-[13px] font-medium whitespace-nowrap transition-all ${
               mainTab === t.key ? 'bg-[#0F2D52] text-white shadow-sm' : 'text-[#64748B] hover:bg-[#E5E7EB]'
             }`}>
@@ -258,8 +255,15 @@ export default function ClaimsPage() {
                 <tr><td colSpan={15} className="px-4 py-16 text-center text-[#64748B] text-sm">No claims found</td></tr>
               ) : claims.map(c => {
                 const aging = getAgingDays(c.createdAt);
+                const priorityLabel =
+                  c.priority === 'urgent' ? 'Urgent' :
+                  c.priority === 'high' ? 'High' :
+                  c.priority === 'low' ? 'Low' : 'Normal';
                 const isHigh = c.priority === 'high' || c.priority === 'urgent';
                 const isRework = c.workflowStatus === 'rework';
+                const practiceLabel = c.practiceCode && c.practiceName
+                  ? `${c.practiceCode} — ${c.practiceName}`
+                  : c.practiceName || '—';
                 return (
                   <tr key={c.id} onClick={() => setSelectedRow(c.id)} onDoubleClick={() => router.push(`/claims/${c.id}`)}
                     className={`border-b border-[#F1F5F9] cursor-pointer transition-colors ${selectedRow === c.id ? 'bg-[#EFF6FF]' : isRework ? 'bg-red-50/30' : 'hover:bg-[#FAFBFC]'}`}>
@@ -267,13 +271,13 @@ export default function ClaimsPage() {
                       <input type="checkbox" className="rounded border-[#D1D5DB]" checked={selectedClaims.includes(c.id)} onChange={() => setSelectedClaims(selectedClaims.includes(c.id) ? selectedClaims.filter(x => x !== c.id) : [...selectedClaims, c.id])} />
                     </td>}
                     <td className="px-3 py-2.5"><button onClick={e => { e.stopPropagation(); router.push(`/claims/${c.id}`); }} className="text-[#2563EB] hover:underline text-[13px] font-medium max-w-[200px] truncate block text-left">{c.claimNumber}</button></td>
-                    <td className="px-3 py-2.5 text-[13px] text-[#64748B] max-w-[130px] truncate">{c.provider || '—'}</td>
+                    <td className="px-3 py-2.5 text-[13px] text-slate-700 font-medium max-w-[170px] truncate" title={practiceLabel !== '—' ? practiceLabel : undefined}>{practiceLabel}</td>
                     <td className="px-3 py-2.5"><p className="text-[13px] font-bold text-slate-900 uppercase">{c.patientName || '—'}</p>{c.dateOfService && <p className="text-[11px] text-[#94A3B8]">{fmtDate(c.dateOfService)}</p>}</td>
                     <td className="px-3 py-2.5 text-[13px] text-slate-800 max-w-[140px] truncate">{c.insurance || '—'}</td>
                     <td className="px-3 py-2.5 text-[13px] text-[#64748B]">{c.assigneeName || '—'}</td>
                     <td className="px-3 py-2.5 text-[13px] font-bold text-slate-900 whitespace-nowrap">{fmt(c.balance)}</td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap"><span className={`text-[13px] font-bold ${aging > 180 ? 'text-[#DC2626]' : 'text-[#16A34A]'}`}>{aging}d</span><span className="text-[11px] text-[#94A3B8] ml-1">{aging > 180 ? '180+' : aging > 90 ? '90-180' : aging > 60 ? '60-90' : aging > 30 ? '30-60' : '0-30'}</span></td>
-                    <td className="px-3 py-2.5"><span className={`text-[12px] font-semibold ${isHigh ? 'text-[#DC2626]' : 'text-[#94A3B8]'}`}>{isHigh ? 'High' : 'Low'}</span></td>
+                    <td className="px-3 py-2.5"><span className={`text-[12px] font-semibold ${isHigh ? 'text-[#DC2626]' : 'text-slate-600'}`}>{priorityLabel}</span></td>
                     <td className="px-3 py-2.5"><WorkflowBadge ws={c.workflowStatus} /></td>
                     <td className="px-3 py-2.5"><StatusPill status={c.status} /></td>
                     <td className="px-3 py-2.5 text-[13px] text-[#64748B]">{c.subStatus || '—'}</td>

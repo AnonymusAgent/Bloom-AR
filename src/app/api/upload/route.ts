@@ -3,14 +3,17 @@ import { db } from '@/db';
 import { uploadedFiles, claims, practices, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { getCurrentUser, canUploadFiles, canAssignClaims } from '@/lib/auth';
+import { canAccessPractice } from '@/lib/rbac';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { parseWorkbookWithMapping } from '@/lib/file-parser';
 import { createNotification } from '@/lib/notifications';
+import { ensureSaaSColumns } from '@/lib/db-schema';
 
 const BATCH_SIZE = 100; // Safe batch size for PostgreSQL parameters
 
 export async function POST(request: NextRequest) {
   try {
+    await ensureSaaSColumns();
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
@@ -28,9 +31,9 @@ export async function POST(request: NextRequest) {
 
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
-    const practiceId = (formData.get('practiceId') as string) || '';
-    const provider = (formData.get('provider') as string) || '';
-    const assignedTo = (formData.get('assignedTo') as string) || '';
+    const practiceId = ((formData.get('practiceId') as string) || '').trim();
+    const provider = ((formData.get('provider') as string) || '').trim();
+    const assignedTo = ((formData.get('assignedTo') as string) || '').trim();
     const sheetName = (formData.get('sheetName') as string) || '';
     const headerRowIndexStr = formData.get('headerRowIndex') as string | null;
     const headerRowIndex = headerRowIndexStr ? parseInt(headerRowIndexStr, 10) : 0;
@@ -48,10 +51,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate practice exists if provided
+    // Validate practice exists and user has access if provided
+    let selectedPracticeRecord: { id: string; name: string; code: string } | null = null;
     if (practiceId) {
       const [practice] = await db
-        .select({ id: practices.id, name: practices.name })
+        .select({ id: practices.id, name: practices.name, code: practices.code })
         .from(practices)
         .where(eq(practices.id, practiceId))
         .limit(1);
@@ -62,6 +66,15 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
+
+      const hasAccess = await canAccessPractice(user, practiceId);
+      if (!hasAccess) {
+        return NextResponse.json(
+          { error: 'You do not have permission to import claims for this practice.' },
+          { status: 403 }
+        );
+      }
+      selectedPracticeRecord = practice;
     }
 
     // Validate assigned user if provided
@@ -169,6 +182,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      const initialStatus = assignedTo ? ('assigned' as const) : ('new' as const);
+      const now = new Date();
+
       // Prepare claim records for database insertion
       const claimsToInsert = records.map((data) => ({
         claimNumber: data.claimNumber!,
@@ -184,13 +200,13 @@ export async function POST(request: NextRequest) {
         billedAmount: data.billedAmount || '0.00',
         paidAmount: data.paidAmount || '0.00',
         balance: data.balance || data.billedAmount || '0.00',
-        status: 'new' as const,
+        status: initialStatus,
         workflowStatus: 'unworked',
         practiceId: practiceId || null,
         uploadedFileId: uploadRecord.id,
         assignedTo: assignedTo || null,
         assignedBy: assignedTo ? user.id : null,
-        assignedAt: assignedTo ? new Date() : null,
+        assignedAt: assignedTo ? now : null,
         additionalData: data.additionalData || null,
       }));
 
@@ -214,11 +230,14 @@ export async function POST(request: NextRequest) {
 
       // Notify assigned user if assigned
       if (assignedTo) {
+        const practiceSuffix = selectedPracticeRecord
+          ? ` for ${selectedPracticeRecord.code} — ${selectedPracticeRecord.name}`
+          : '';
         await createNotification({
           userId: assignedTo,
           type: 'new_assignment',
           title: 'New AR Claims Assigned',
-          message: `${insertedCount} claim(s) from "${fileName}" have been assigned to your work queue.`,
+          message: `${insertedCount} claim(s) from "${fileName}"${practiceSuffix} have been assigned to your work queue.`,
         });
       }
 
@@ -235,6 +254,7 @@ export async function POST(request: NextRequest) {
           skippedRows: stats.skippedRows,
           duplicatesInFile: stats.duplicatesInFile,
           practiceId: practiceId || null,
+          practiceName: selectedPracticeRecord?.name || null,
           assignedTo: assignedTo || null,
         },
         ipAddress: request.headers.get('x-forwarded-for') || '127.0.0.1',
@@ -247,6 +267,7 @@ export async function POST(request: NextRequest) {
         recordsProcessed: insertedCount,
         skippedRows: stats.skippedRows,
         duplicatesInFile: stats.duplicatesInFile,
+        practice: selectedPracticeRecord,
         warnings,
       });
     } catch (processingError: any) {

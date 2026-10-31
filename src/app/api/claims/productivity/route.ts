@@ -69,17 +69,17 @@ export async function GET(request: NextRequest) {
     const assignedConds = [...baseConds];
     if (targetUserId) assignedConds.push(eq(claims.assignedTo, targetUserId));
     const [assigned] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(assignedConds.length ? and(...assignedConds) : undefined);
-    const [worked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.workedDate, fromDate), lte(claims.workedDate, toDate), uidCond));
-    const [submitted] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.submittedForApprovalAt, fromDate), lte(claims.submittedForApprovalAt, toDate), uidCond));
-    const [approved] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.approvedAt, fromDate), lte(claims.approvedAt, toDate), uidCond));
-    const [rework] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(eq(claims.workflowStatus, 'rework'), uidCond));
-    const [pendingApproval] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(eq(claims.workflowStatus, 'pending_approval'), uidCond));
-    const [remaining] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(inArray(claims.workflowStatus, ['unworked', 'working', 'rework']), targetUserId ? eq(claims.assignedTo, targetUserId) : undefined));
+    const [worked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.workedDate, fromDate), lte(claims.workedDate, toDate), uidCond));
+    const [submitted] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.submittedForApprovalAt, fromDate), lte(claims.submittedForApprovalAt, toDate), uidCond));
+    const [approved] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.approvedAt, fromDate), lte(claims.approvedAt, toDate), uidCond));
+    const [rework] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, eq(claims.workflowStatus, 'rework'), uidCond));
+    const [pendingApproval] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, eq(claims.workflowStatus, 'pending_approval'), uidCond));
+    const [remaining] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, inArray(claims.workflowStatus, ['unworked', 'working', 'rework']), targetUserId ? eq(claims.assignedTo, targetUserId) : undefined));
 
     // Yesterday stats (for comparison)
-    const [yWorked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.workedDate, yesterdayFrom), lte(claims.workedDate, yesterdayTo), uidCond));
-    const [ySubmitted] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.submittedForApprovalAt, yesterdayFrom), lte(claims.submittedForApprovalAt, yesterdayTo), uidCond));
-    const [yApproved] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(gte(claims.approvedAt, yesterdayFrom), lte(claims.approvedAt, yesterdayTo), uidCond));
+    const [yWorked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.workedDate, yesterdayFrom), lte(claims.workedDate, yesterdayTo), uidCond));
+    const [ySubmitted] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.submittedForApprovalAt, yesterdayFrom), lte(claims.submittedForApprovalAt, yesterdayTo), uidCond));
+    const [yApproved] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(and(...baseConds, gte(claims.approvedAt, yesterdayFrom), lte(claims.approvedAt, yesterdayTo), uidCond));
 
     // Daily trend (last 14 days)
     const dailyTrend = [];
@@ -87,18 +87,19 @@ export async function GET(request: NextRequest) {
       const d = new Date(now); d.setDate(d.getDate() - i); d.setHours(0, 0, 0, 0);
       const dEnd = new Date(d); dEnd.setHours(23, 59, 59, 999);
       const [cnt] = await db.select({ count: sql<number>`count(*)::int` }).from(claims)
-        .where(and(gte(claims.workedDate, d), lte(claims.workedDate, dEnd), uidCond));
+        .where(and(...baseConds, gte(claims.workedDate, d), lte(claims.workedDate, dEnd), uidCond));
       dailyTrend.push({ date: d.toISOString().split('T')[0], count: cnt.count });
     }
 
     // Status distribution
+    const statusWhere = [...baseConds, ...(uidCond ? [uidCond] : [])];
     const statusDist = await db.select({ status: claims.workflowStatus, count: sql<number>`count(*)::int` })
-      .from(claims).where(uidCond).groupBy(claims.workflowStatus);
+      .from(claims).where(statusWhere.length ? and(...statusWhere) : undefined).groupBy(claims.workflowStatus);
 
     // Monthly progress
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const [monthWorked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims)
-      .where(and(gte(claims.workedDate, monthStart), uidCond));
+      .where(and(...baseConds, gte(claims.workedDate, monthStart), uidCond));
     const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
     const dayOfMonth = now.getDate();
     const monthlyTarget = assigned.count > 0 ? assigned.count : 100;
