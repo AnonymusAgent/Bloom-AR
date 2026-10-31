@@ -6,11 +6,16 @@ import { hashPassword } from '@/lib/auth';
 import { slugify, validateSlug, makeToken, hashToken, ensureDefaultPlans } from '@/lib/saas';
 import { sendVerificationEmail } from '@/lib/auth-emails';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
+import { ensureSaaSColumns, schemaHint, safeErrorDetail } from '@/lib/db-schema';
 
 export async function POST(req: NextRequest) {
-  const rl = await checkRateLimit(getClientIp(req), 'register');
-  if (!rl.allowed) return NextResponse.json({ error: 'Too many attempts. Try again later.' }, { status: 429 });
   try {
+    const schema = await ensureSaaSColumns();
+    if (!schema.ok && schema.missingTables.includes('users')) {
+      return NextResponse.json({ error: schemaHint(schema.missingTables), code: 'SCHEMA_NOT_READY' }, { status: 503 });
+    }
+    const rl = await checkRateLimit(getClientIp(req), 'register');
+    if (!rl.allowed) return NextResponse.json({ error: 'Too many attempts. Try again later.' }, { status: 429 });
     const b = await req.json();
     const { firstName, lastName, email, password, organizationName, orgType, country, timezone, planSlug, acceptedTerms } = b;
     if (!firstName || !email || !password || !organizationName) return NextResponse.json({ error: 'Name, email, password and organization name are required' }, { status: 400 });
@@ -33,5 +38,5 @@ export async function POST(req: NextRequest) {
     await db.insert(authTokens).values({ userId: user.id, type: 'email_verification', tokenHash: hashToken(token), expiresAt: new Date(Date.now() + 24 * 3600e3) });
     const sent = await sendVerificationEmail(normEmail, token);
     return NextResponse.json({ success: true, organization: { id: org.id, slug: org.slug }, workspacePath: `/dashboard`, emailDelivery: sent.success ? 'accepted_by_provider' : 'not_configured', message: 'Account created. Verify your email before signing in.' }, { status: 201 });
-  } catch (e) { console.error('register', e); return NextResponse.json({ error: 'Registration failed' }, { status: 500 }); }
+  } catch (e) { console.error('register', e); return NextResponse.json({ error: 'Registration failed', detail: safeErrorDetail(e) }, { status: 500 }); }
 }
