@@ -51,7 +51,6 @@ A comprehensive, enterprise-grade web application for managing Accounts Receivab
 
 ### Enterprise Features
 - **🖊️ E-Signatures** — Canvas signature pad (mouse/touch/stylus) for appeals, agreements, authorizations
-- **🌐 Payer Portal Integration** — Full CRUD management, real API integration (no simulated data), eligibility/claim status/benefits checks with live data indicators and proper error messages
 - **🏢 Multi-Tenant** — Independent organizations with data isolation, branding, and membership roles
 - **🔑 External API** — RESTful v1 API with API key authentication for third-party integrations
 - **📧 Email Digests** — Automated daily summary emails with pending work, overdue tasks, denied claims
@@ -162,7 +161,6 @@ src/
 │   ├── login/                  # Login page
 │   ├── notifications/          # Notification center
 │   ├── ocr/                    # OCR document scanner
-│   ├── payer-portals/          # Payer portal integrations
 │   ├── practices/              # Practice management
 │   ├── productivity/           # Productivity dashboard
 │   ├── reports/                # Advanced reports & export
@@ -189,7 +187,6 @@ src/
 │       ├── notifications/      # Notification CRUD
 │       ├── ocr/                # OCR scan + apply
 │       ├── organizations/      # Multi-tenant management
-│       ├── payer-portals/      # Portal config + status checks
 │       ├── practices/          # Practice CRUD + assignment
 │       ├── productivity/       # Productivity metrics
 │       ├── reports/            # Advanced reporting queries
@@ -232,7 +229,6 @@ src/
 | Review Sign-offs | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | View Reports | ✓ | ✓ | ✓ | | | | |
 | View Audit Logs | ✓ | ✓ | ✓ | | | | |
-| Manage Payer Portals | ✓ | ✓ | ✓ | | | | |
 | Manage Organizations | ✓ | | | | | | |
 | Manage API Keys | ✓ | | | | | | |
 | Team Chat | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -275,8 +271,6 @@ src/
 | `e_signatures` | Electronic signature records |
 | `ocr_scans` | OCR extraction results |
 | `denial_analyses` | AI denial analysis results |
-| `payer_portals` | Payer portal configurations |
-| `portal_interactions` | Portal interaction log |
 | `organizations` | Multi-tenant organizations |
 | `organization_members` | Org membership |
 | `api_keys` | External API authentication |
@@ -328,7 +322,6 @@ API keys are managed at `/api/api-keys` (admin only). Keys are bcrypt-hashed; th
 | Feature | Complexity |
 |---------|------------|
 | Two-factor authentication | Low |
-| Real payer portal API connections | High |
 | ML denial prediction model | High |
 | Mobile PWA | Medium |
 | OAuth2 for external API | Medium |

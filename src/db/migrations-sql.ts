@@ -26,6 +26,10 @@ export const DRIZZLE_MIGRATIONS: ReadonlyArray<DrizzleMigrationEntry> = [
   {
     "hash": "0004_site_settings",
     "sql": "-- Website CMS: key/value settings edited from Platform Admin -> Website.\n-- Non-destructive. Rollback: DROP TABLE \"site_settings\";\nCREATE TABLE IF NOT EXISTS \"site_settings\" (\n  \"key\" varchar(100) PRIMARY KEY,\n  \"value\" jsonb NOT NULL,\n  \"updated_by\" uuid REFERENCES \"users\"(\"id\"),\n  \"updated_at\" timestamp DEFAULT now() NOT NULL\n);\n"
+  },
+  {
+    "hash": "0005_drop_payer_portals",
+    "sql": "-- Remove deprecated payer portal tables.\nDROP TABLE IF EXISTS \"portal_interactions\" CASCADE;\nDROP TABLE IF EXISTS \"payer_portals\" CASCADE;\n"
   }
 ];
 

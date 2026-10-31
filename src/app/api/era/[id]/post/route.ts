@@ -50,15 +50,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         // Update claim balance
         const [claim] = await db.select().from(claims).where(eq(claims.id, tx.claimId)).limit(1);
         if (claim) {
-          const currentBilled = parseFloat(String(claim.billedAmount || '0'));
-          const currentPaid = parseFloat(String(claim.paidAmount || '0'));
+          const currentPaid = parseFloat(String(claim.paidAmount || '0')) || 0;
           const newPaid = currentPaid + paidAmt;
-          const newBalance = currentBilled - newPaid - contractAdj - otherAdj;
-          const newStatus = newBalance <= 0 ? 'paid' : (paidAmt > 0 ? 'in_progress' : claim.status);
+          const baseBalance =
+            claim.balance !== null && claim.balance !== undefined
+              ? parseFloat(String(claim.balance)) || 0
+              : Math.max(0, (parseFloat(String(claim.billedAmount || '0')) || 0) - currentPaid);
+          const newBalance = Math.max(0, baseBalance - paidAmt - contractAdj - otherAdj);
+          const paidInFull = newBalance <= 0.005;
+          const newStatus = paidInFull ? 'paid' : paidAmt > 0 ? 'in_progress' : claim.status;
 
           await db.update(claims).set({
-            paidAmount: String(newPaid), balance: String(Math.max(0, newBalance)),
-            status: newStatus as typeof claim.status, updatedAt: new Date(),
+            paidAmount: newPaid.toFixed(2),
+            balance: newBalance.toFixed(2),
+            status: newStatus as typeof claim.status,
+            ...(paidInFull ? { claimInsuranceStatus: 'processed', workflowStatus: 'approved' } : {}),
+            updatedAt: new Date(),
           }).where(eq(claims.id, tx.claimId));
 
           await db.insert(claimStatusHistory).values({

@@ -823,42 +823,6 @@ export const denialAnalyses = pgTable('denial_analyses', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
-// ==================== PAYER PORTAL INTEGRATIONS ====================
-export const payerPortals = pgTable('payer_portals', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  payerName: varchar('payer_name', { length: 255 }).notNull(),
-  payerCode: varchar('payer_code', { length: 50 }).notNull().unique(),
-  payerId: varchar('payer_id', { length: 100 }),
-  portalUrl: varchar('portal_url', { length: 500 }),
-  apiEndpoint: varchar('api_endpoint', { length: 500 }),
-  authMethod: varchar('auth_method', { length: 50 }).default('none'),
-  credentials: jsonb('credentials'),
-  isActive: boolean('is_active').notNull().default(true),
-  isConfigured: boolean('is_configured').notNull().default(false),
-  supportsEligibility: boolean('supports_eligibility').default(false),
-  supportsClaimStatus: boolean('supports_claim_status').default(false),
-  supportsEra: boolean('supports_era').default(false),
-  supportsAuth: boolean('supports_auth').default(false),
-  lastTestedAt: timestamp('last_tested_at'),
-  lastTestStatus: varchar('last_test_status', { length: 20 }),
-  notes: text('notes'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow(),
-});
-
-export const portalInteractions = pgTable('portal_interactions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  payerPortalId: uuid('payer_portal_id').notNull().references(() => payerPortals.id),
-  interactionType: varchar('interaction_type', { length: 50 }).notNull(),
-  claimId: uuid('claim_id').references(() => claims.id, { onDelete: 'set null' }),
-  requestData: jsonb('request_data'),
-  responseData: jsonb('response_data'),
-  status: varchar('status', { length: 20 }).notNull(),
-  errorMessage: text('error_message'),
-  performedBy: uuid('performed_by').notNull().references(() => users.id),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-});
-
 // ==================== MULTI-TENANT / ORGANIZATIONS ====================
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -1164,6 +1128,5 @@ export type ScrubbingRule = typeof scrubbingRules.$inferSelect;
 export type ESignature = typeof eSignatures.$inferSelect;
 export type OcrScan = typeof ocrScans.$inferSelect;
 export type DenialAnalysis = typeof denialAnalyses.$inferSelect;
-export type PayerPortal = typeof payerPortals.$inferSelect;
 export type Organization = typeof organizations.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;

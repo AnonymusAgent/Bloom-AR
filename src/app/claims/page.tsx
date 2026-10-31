@@ -140,9 +140,9 @@ function ClaimsPageContent() {
       else if (mainTab === 'record') {
         if (recordFilter === 'in_process') params.set('status', 'in_progress');
         else if (recordFilter === 'processed') params.set('status', 'approved,paid');
-        else if (recordFilter === 'rejected') params.set('status', 'rework_required');
+        else if (recordFilter === 'rejected') params.set('insuranceStatus', 'rejected');
         else if (recordFilter === 'denied') params.set('status', 'denied');
-        else if (recordFilter === 'partial_paid') params.set('status', 'paid');
+        else if (recordFilter === 'partial_paid') params.set('insuranceStatus', 'partial_paid');
         else if (recordFilter === 'closed') params.set('status', 'closed');
         else if (recordFilter === 'unworkable') params.set('workflowStatus', 'dead');
       }

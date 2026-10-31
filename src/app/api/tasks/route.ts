@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { billingTasks, users, practices, taskStatusHistory } from '@/db/schema';
 import { eq, and, or, ilike, desc, inArray, gte, lte, sql } from 'drizzle-orm';
-import { getCurrentUser, canAssignTasks, isSupervisorOrAbove } from '@/lib/auth';
+import { getCurrentUser, canAssignTasks } from '@/lib/auth';
+import { getUserAuthorizedUserIds } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,29 +16,20 @@ export async function GET(request: NextRequest) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const search = searchParams.get('search');
+    const search = searchParams.get('search')?.trim();
     const category = searchParams.get('category');
     const status = searchParams.get('status');
-    const assignedTo = searchParams.get('assignedTo');
-    const practiceId = searchParams.get('practiceId');
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '20');
+    const assignedTo = cleanUuid(searchParams.get('assignedTo'));
+    const practiceId = cleanUuid(searchParams.get('practiceId'));
+    const page = cleanPage(searchParams.get('page'));
+    const limit = cleanLimit(searchParams.get('limit'), 20, 100);
 
     const conditions = [];
 
-    // Role-based filtering
-    if (!isSupervisorOrAbove(user.role)) {
-      // Regular users can only see tasks assigned to them
-      conditions.push(eq(billingTasks.assignedTo, user.id));
-    } else if (user.role === 'team_lead' || user.role === 'senior_lead') {
-      // Team leads see their team's tasks
-      const teamMembers = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.teamLeadId, user.id));
-      
-      const teamMemberIds = [user.id, ...teamMembers.map(m => m.id)];
-      conditions.push(inArray(billingTasks.assignedTo, teamMemberIds));
+    // Role-based filtering: admins/supervisors/managers see all; team/senior leads see their team; regular users see their own
+    const authorizedUsers = await getUserAuthorizedUserIds(user);
+    if (authorizedUsers !== 'all') {
+      conditions.push(inArray(billingTasks.assignedTo, authorizedUsers));
     }
 
     if (search) {
@@ -179,23 +172,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const safeAssignedTo = cleanUuid(assignedTo);
+
     const taskData: typeof billingTasks.$inferInsert = {
-      title,
-      description,
+      title: String(title).trim(),
+      description: description ? String(description).trim() : null,
       category,
       priority: priority || 'normal',
-      practiceId,
-      claimId,
-      patientName,
-      patientDob,
-      insuranceName,
-      memberId,
-      serviceDate,
-      dueDate,
-      status: assignedTo ? 'assigned' : 'new',
-      assignedTo,
-      assignedBy: assignedTo ? user.id : undefined,
-      assignedAt: assignedTo ? new Date() : undefined,
+      practiceId: cleanUuid(practiceId),
+      claimId: cleanUuid(claimId),
+      patientName: patientName ? String(patientName).trim() : null,
+      patientDob: cleanDate(patientDob),
+      insuranceName: insuranceName ? String(insuranceName).trim() : null,
+      memberId: memberId ? String(memberId).trim() : null,
+      serviceDate: cleanDate(serviceDate),
+      dueDate: cleanDate(dueDate),
+      status: safeAssignedTo ? 'assigned' : 'new',
+      assignedTo: safeAssignedTo,
+      assignedBy: safeAssignedTo ? user.id : undefined,
+      assignedAt: safeAssignedTo ? new Date() : undefined,
     };
 
     const [newTask] = await db
@@ -212,9 +207,9 @@ export async function POST(request: NextRequest) {
     });
 
     // Notify assignee
-    if (assignedTo) {
+    if (safeAssignedTo) {
       await createNotification({
-        userId: assignedTo,
+        userId: safeAssignedTo,
         type: 'task_assigned',
         title: 'New Task Assigned',
         message: `You have been assigned a new ${category.replace('_', ' ')} task: ${title}`,

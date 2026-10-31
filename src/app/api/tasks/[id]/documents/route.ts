@@ -87,11 +87,24 @@ export async function POST(
       );
     }
 
-    // Validate file type
-    const allowedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv'];
-    if (!allowedTypes.includes(file.type)) {
+    // Validate file type or extension
+    const allowedTypes = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'text/csv',
+      'text/plain',
+      'image/png',
+      'image/jpeg',
+      'image/webp',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ];
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['pdf', 'xlsx', 'xls', 'csv', 'txt', 'png', 'jpg', 'jpeg', 'webp', 'doc', 'docx'];
+    if (!allowedTypes.includes(file.type) && !allowedExts.includes(ext)) {
       return NextResponse.json(
-        { error: 'Invalid file type. Allowed: PDF, XLSX, XLS, CSV' },
+        { error: 'Invalid file type. Allowed: PDF, XLSX, XLS, CSV, TXT, PNG, JPG, DOC, DOCX' },
         { status: 400 }
       );
     }

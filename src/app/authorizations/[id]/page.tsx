@@ -6,7 +6,7 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
-import { ArrowLeft, CheckCircle, Upload, FileText, Clock } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Upload, FileText, Download } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 
 function AuthStatusBadge({ status }: { status: string }) {
@@ -109,6 +109,7 @@ export default function AuthDetailPage({ params }: { params: Promise<{ id: strin
             : <div className="space-y-2">{docs.map(d=>(
               <div key={d.id} className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg">
                 <FileText className="w-5 h-5 text-slate-400"/><div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{d.fileName}</p><p className="text-xs text-slate-500">{new Date(d.createdAt).toLocaleDateString()}</p></div>
+                <a href={`/api/authorizations/${id}/documents/${d.id}`} download={d.fileName} className="p-1.5 text-slate-500 hover:text-blue-600 rounded" title="Download document"><Download className="w-4 h-4"/></a>
               </div>
             ))}</div>}
           </Card>

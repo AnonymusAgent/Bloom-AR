@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { authorizations, users } from '@/db/schema';
 import { eq, and, or, ilike, desc, sql, inArray } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { getCurrentUser } from '@/lib/auth';
+import { getUserAuthorizedUserIds } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -12,25 +14,33 @@ export async function GET(request: NextRequest) {
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const sp = request.nextUrl.searchParams;
-    const search = sp.get('search');
+    const search = sp.get('search')?.trim();
     const status = sp.get('status');
-    const assignedTo = sp.get('assignedTo');
-    const page = parseInt(sp.get('page') || '1');
-    const limit = parseInt(sp.get('limit') || '20');
+    const assignedTo = cleanUuid(sp.get('assignedTo'));
+    const page = cleanPage(sp.get('page'));
+    const limit = cleanLimit(sp.get('limit'), 20, 100);
+
+    const authorizedUsers = await getUserAuthorizedUserIds(user);
+    const scopeCondition =
+      authorizedUsers === 'all'
+        ? undefined
+        : inArray(authorizations.assignedTo, authorizedUsers);
 
     const conditions = [];
-    if (!isSupervisorOrAbove(user.role)) {
-      conditions.push(eq(authorizations.assignedTo, user.id));
-    }
+    if (scopeCondition) conditions.push(scopeCondition);
     if (search) {
-      conditions.push(or(
-        ilike(authorizations.patientName, `%${search}%`),
-        ilike(authorizations.insuranceName, `%${search}%`),
-        ilike(authorizations.authNumber, `%${search}%`)
-      ));
+      conditions.push(
+        or(
+          ilike(authorizations.patientName, `%${search}%`),
+          ilike(authorizations.insuranceName, `%${search}%`),
+          ilike(authorizations.authNumber, `%${search}%`)
+        )!
+      );
     }
     if (status) {
-      conditions.push(eq(authorizations.status, status as 'pending' | 'in_progress' | 'completed' | 'denied' | 'expired'));
+      conditions.push(
+        eq(authorizations.status, status as 'pending' | 'in_progress' | 'completed' | 'denied' | 'expired')
+      );
     }
     if (assignedTo) {
       conditions.push(eq(authorizations.assignedTo, assignedTo));
@@ -38,29 +48,47 @@ export async function GET(request: NextRequest) {
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(authorizations).where(whereClause);
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(authorizations)
+      .where(whereClause);
 
-    const rows = await db.select().from(authorizations).where(whereClause).orderBy(desc(authorizations.createdAt)).limit(limit).offset((page - 1) * limit);
+    const rows = await db
+      .select()
+      .from(authorizations)
+      .where(whereClause)
+      .orderBy(desc(authorizations.createdAt))
+      .limit(limit)
+      .offset((page - 1) * limit);
 
-    const withNames = await Promise.all(rows.map(async (a) => {
-      let assigneeName = null;
-      if (a.assignedTo) {
-        const [u] = await db.select({ firstName: users.firstName, lastName: users.lastName }).from(users).where(eq(users.id, a.assignedTo)).limit(1);
-        assigneeName = u ? `${u.firstName} ${u.lastName}` : null;
-      }
-      return { ...a, assigneeName };
-    }));
+    const withNames = await Promise.all(
+      rows.map(async (a) => {
+        let assigneeName = null;
+        if (a.assignedTo) {
+          const [u] = await db
+            .select({ firstName: users.firstName, lastName: users.lastName })
+            .from(users)
+            .where(eq(users.id, a.assignedTo))
+            .limit(1);
+          assigneeName = u ? `${u.firstName} ${u.lastName}` : null;
+        }
+        return { ...a, assigneeName };
+      })
+    );
 
-    // Stats
-    const stats = await db.select({
-      status: authorizations.status,
-      count: sql<number>`count(*)::int`,
-    }).from(authorizations).where(
-      !isSupervisorOrAbove(user.role) ? eq(authorizations.assignedTo, user.id) : undefined
-    ).groupBy(authorizations.status);
+    const stats = await db
+      .select({
+        status: authorizations.status,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(authorizations)
+      .where(scopeCondition)
+      .groupBy(authorizations.status);
 
     const statusMap: Record<string, number> = {};
-    stats.forEach(s => { statusMap[s.status] = s.count; });
+    stats.forEach((s) => {
+      statusMap[s.status] = s.count;
+    });
 
     return NextResponse.json({
       authorizations: withNames,
@@ -84,13 +112,7 @@ export async function POST(request: NextRequest) {
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const body = await request.json();
-    const { patientName, insuranceName, authNumber, serviceRequested, cptCodes, diagnosisCodes, notes, claimId, practiceId, assignedTo, expirationDate } = body;
-
-    if (!patientName || !insuranceName) {
-      return NextResponse.json({ error: 'Patient name and insurance name are required' }, { status: 400 });
-    }
-
-    const [newAuth] = await db.insert(authorizations).values({
+    const {
       patientName,
       insuranceName,
       authNumber,
@@ -98,14 +120,38 @@ export async function POST(request: NextRequest) {
       cptCodes,
       diagnosisCodes,
       notes,
-      claimId,
-      practiceId,
-      expirationDate,
-      status: assignedTo ? 'in_progress' : 'pending',
-      assignedTo,
-      assignedBy: user.id,
-      assignedAt: assignedTo ? new Date() : undefined,
-    }).returning();
+    } = body;
+
+    if (!patientName || !insuranceName) {
+      return NextResponse.json({ error: 'Patient name and insurance name are required' }, { status: 400 });
+    }
+
+    const claimId = cleanUuid(body.claimId);
+    const practiceId = cleanUuid(body.practiceId);
+    const assignedTo = cleanUuid(body.assignedTo);
+    const expirationDate = cleanDate(body.expirationDate);
+    const dateObtained = cleanDate(body.dateObtained);
+
+    const [newAuth] = await db
+      .insert(authorizations)
+      .values({
+        patientName: String(patientName).trim(),
+        insuranceName: String(insuranceName).trim(),
+        authNumber: authNumber ? String(authNumber).trim() : null,
+        serviceRequested: serviceRequested ? String(serviceRequested).trim() : null,
+        cptCodes: cptCodes ? String(cptCodes).trim() : null,
+        diagnosisCodes: diagnosisCodes ? String(diagnosisCodes).trim() : null,
+        notes: notes ? String(notes).trim() : null,
+        claimId,
+        practiceId,
+        dateObtained,
+        expirationDate,
+        status: assignedTo ? 'in_progress' : 'pending',
+        assignedTo,
+        assignedBy: user.id,
+        assignedAt: assignedTo ? new Date() : undefined,
+      })
+      .returning();
 
     if (assignedTo) {
       await createNotification({
@@ -117,8 +163,11 @@ export async function POST(request: NextRequest) {
     }
 
     await createAuditLog({
-      userId: user.id, action: 'authorization_created', entityType: 'authorization',
-      entityId: newAuth.id, newValue: { patientName, insuranceName },
+      userId: user.id,
+      action: 'authorization_created',
+      entityType: 'authorization',
+      entityId: newAuth.id,
+      newValue: { patientName, insuranceName },
     });
 
     return NextResponse.json({ authorization: newAuth });

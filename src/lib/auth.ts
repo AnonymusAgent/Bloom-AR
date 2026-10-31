@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify } from 'jose';
+import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { cookies } from 'next/headers';
 import { db } from '@/db';
@@ -21,6 +22,7 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 export async function createSession(userId: string): Promise<string> {
   const token = await new SignJWT({ userId })
     .setProtectedHeader({ alg: 'HS256' })
+    .setJti(randomUUID())
     .setExpirationTime('7d')
     .setIssuedAt()
     .sign(JWT_SECRET);
@@ -62,7 +64,7 @@ export async function verifySession(token: string) {
       .where(eq(users.id, session.userId))
       .limit(1);
 
-    if (!user || !user.isActive) {
+    if (!user || !user.isActive || user.accountStatus === 'suspended') {
       return null;
     }
 

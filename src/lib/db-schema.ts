@@ -42,6 +42,8 @@ const STATEMENTS = [
   `ALTER TABLE "practices" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `ALTER TABLE "patients" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `CREATE TABLE IF NOT EXISTS "site_settings" ("key" varchar(100) PRIMARY KEY, "value" jsonb NOT NULL, "updated_by" uuid, "updated_at" timestamp NOT NULL DEFAULT now())`,
+  `DROP TABLE IF EXISTS "portal_interactions" CASCADE`,
+  `DROP TABLE IF EXISTS "payer_portals" CASCADE`,
 ];
 
 export interface SchemaStatus {

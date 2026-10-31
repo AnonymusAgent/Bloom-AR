@@ -28,22 +28,38 @@ export interface EmailOptions {
   text?: string;
 }
 
-export async function sendEmail(options: EmailOptions): Promise<{ success: boolean; messageId?: string; preview?: unknown }> {
+export function isEmailConfigured(): boolean {
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+
+export async function sendEmail(
+  options: EmailOptions
+): Promise<{ success: boolean; configured: boolean; messageId?: string; preview?: unknown }> {
+  if (!isEmailConfigured()) {
+    console.log('[Email Not Configured] Skipping SMTP send:', { to: options.to, subject: options.subject });
+    return { success: false, configured: false };
+  }
   try {
     const t = await getTransporter();
     const from = process.env.SMTP_FROM || 'BloomAR Manager <noreply@bloomar.com>';
 
-    const result = await t.sendMail({ from, to: options.to, subject: options.subject, html: options.html, text: options.text });
+    const result = await t.sendMail({
+      from,
+      to: options.to,
+      subject: options.subject,
+      html: options.html,
+      text: options.text,
+    });
 
-    // If using jsonTransport (dev mode), log the email
-    if (result.message) {
-      console.log('[Email Dev Mode] Would send:', { to: options.to, subject: options.subject });
-    }
-
-    return { success: true, messageId: result.messageId, preview: result.message ? JSON.parse(result.message) : undefined };
+    return {
+      success: true,
+      configured: true,
+      messageId: result.messageId,
+      preview: result.message ? JSON.parse(result.message) : undefined,
+    };
   } catch (error) {
     console.error('Email send error:', error);
-    return { success: false };
+    return { success: false, configured: true };
   }
 }
 

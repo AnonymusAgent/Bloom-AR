@@ -7,7 +7,9 @@ import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
 export async function GET() {
   try {
     const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user || !isSupervisorOrAbove(user.role)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: user ? 403 : 401 });
+    }
 
     const today = new Date(); today.setHours(0,0,0,0);
     const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);

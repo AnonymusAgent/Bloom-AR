@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { organizationDomains } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 import { requireMembership } from '@/lib/tenant';
 import { makeToken, hashToken } from '@/lib/saas';
+import { cleanUuid } from '@/lib/sanitize';
 import { promises as dns } from 'dns';
 export async function GET(_r: NextRequest, { params }: { params: Promise<{id:string}> }) {
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -39,8 +40,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{id:s
 }
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{id:string}> }) {
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const { id } = await params; if (!await requireMembership(user.id, id, ['owner','super_admin'])) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  const { hostname } = await req.json();
-  await db.delete(organizationDomains).where(eq(organizationDomains.hostname, String(hostname).toLowerCase()));
+  const { id } = await params; if (!await requireMembership(user.id, id, ['owner','admin','super_admin'])) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  const body = await req.json().catch(() => ({} as Record<string, string>));
+  const domainId = cleanUuid(req.nextUrl.searchParams.get('domainId') || body.domainId);
+  const hostname = (req.nextUrl.searchParams.get('hostname') || body.hostname || '').trim().toLowerCase();
+  if (domainId) {
+    await db.delete(organizationDomains).where(and(eq(organizationDomains.id, domainId), eq(organizationDomains.organizationId, id)));
+  } else if (hostname) {
+    await db.delete(organizationDomains).where(and(eq(organizationDomains.hostname, hostname), eq(organizationDomains.organizationId, id)));
+  } else {
+    return NextResponse.json({ error: 'domainId or hostname required' }, { status: 400 });
+  }
   return NextResponse.json({ success: true });
 }

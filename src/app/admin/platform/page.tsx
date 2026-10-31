@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { AppLayout } from '@/components/layout/AppLayout';
 
 const inp = 'w-full border rounded-lg px-3 py-2 text-sm';
 const lbl = 'block text-xs font-semibold text-slate-500 mt-3';
@@ -19,10 +20,10 @@ function PlatformAdminContent() {
     const t = searchParams.get('tab') as Tab | null;
     if (t && VALID_PLATFORM_TABS.includes(t)) setTab(t);
   }, [searchParams]);
-  if (err) return <main className="min-h-screen bg-slate-100 p-8"><div className={`${card} max-w-xl mx-auto`}><h1 className="font-bold text-lg">Platform Admin</h1><p className="text-red-600 text-sm mt-2">{err}</p><p className="text-sm text-slate-600 mt-3">Ask an operator to either set <code className="bg-slate-100 px-1">PLATFORM_ADMIN_EMAILS</code> in the hosting environment to your sign-in email (comma-separated for multiple admins) and redeploy, run <code className="bg-slate-100 px-1">scripts/bootstrap-platform-admin.mjs</code> with private env credentials, or set <code className="bg-slate-100 px-1">users.is_platform_admin=true</code> for your account in the database. Then sign out and back in.</p></div></main>;
-  if (!data) return <main className="p-8">Loading platform admin…</main>;
+  if (err) return <AppLayout title="Platform Admin"><div className={`${card} max-w-xl mx-auto mt-4`}><h1 className="font-bold text-lg">Platform Admin</h1><p className="text-red-600 text-sm mt-2">{err}</p><p className="text-sm text-slate-600 mt-3">Ask an operator to either set <code className="bg-slate-100 px-1">PLATFORM_ADMIN_EMAILS</code> in the hosting environment to your sign-in email (comma-separated for multiple admins) and redeploy, run <code className="bg-slate-100 px-1">scripts/bootstrap-platform-admin.mjs</code> with private env credentials, or set <code className="bg-slate-100 px-1">users.is_platform_admin=true</code> for your account in the database. Then sign out and back in.</p></div></AppLayout>;
+  if (!data) return <AppLayout title="Platform Admin"><div className="p-8 text-sm text-slate-600">Loading platform admin…</div></AppLayout>;
   const tabs: [Tab,string][] = [['overview','Overview'],['website','🌐 Website'],['plans','Plans & Pricing'],['organizations','Organizations'],['users','Users'],['leads','Leads Inbox'],['system','Domains & System']];
-  return <main className="min-h-screen bg-[#F5F7FA]"><div className="max-w-6xl mx-auto p-5 space-y-5">
+  return <AppLayout title="Platform Admin"><div className="max-w-6xl mx-auto space-y-5">
     <header className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-extrabold text-[#0F2D52]">Platform Admin</h1><p className="text-sm text-slate-500">Manage your public website, plans, customers and platform — separate from any single organization&apos;s workspace.</p></div><a href="/" target="_blank" className="text-sm text-[#2563EB] font-semibold">View live website ↗</a></header>
     <nav className="flex flex-wrap gap-2" aria-label="Admin sections">{tabs.map(([t,l]) => <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 rounded-lg text-sm font-semibold ${tab===t?'bg-[#0F2D52] text-white':'bg-white border'}`}>{l}</button>)}</nav>
     {msg && <p role="status" className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-4 py-2 text-sm">{msg}</p>}
@@ -33,7 +34,7 @@ function PlatformAdminContent() {
     {tab==='users' && <UsersAdmin setMsg={setMsg} />}
     {tab==='leads' && <LeadsAdmin setMsg={setMsg} />}
     {tab==='system' && <System data={data} />}
-  </div></main>;
+  </div></AppLayout>;
 }
 
 function Overview({ data, go }: any) {
@@ -106,5 +107,5 @@ function System({ data }: any) {
 }
 
 export default function PlatformAdmin() {
-  return <Suspense fallback={<main className="p-8">Loading platform admin…</main>}><PlatformAdminContent /></Suspense>;
+  return <Suspense fallback={<AppLayout title="Platform Admin"><div className="p-8 text-sm text-slate-600">Loading platform admin…</div></AppLayout>}><PlatformAdminContent /></Suspense>;
 }

@@ -5,15 +5,16 @@ import { eq, desc, sql, ilike } from 'drizzle-orm';
 import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { parseEraFile } from '@/lib/era-parser';
+import { cleanPage, cleanLimit } from '@/lib/sanitize';
 import { createHash } from 'crypto';
 
 export async function GET(request: NextRequest) {
   try {
     const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!user || !isSupervisorOrAbove(user.role)) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
 
-    const page = parseInt(request.nextUrl.searchParams.get('page') || '1');
-    const limit = parseInt(request.nextUrl.searchParams.get('limit') || '20');
+    const page = cleanPage(request.nextUrl.searchParams.get('page'));
+    const limit = cleanLimit(request.nextUrl.searchParams.get('limit'), 20, 100);
 
     const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(eraFiles);
     const rows = await db.select().from(eraFiles).orderBy(desc(eraFiles.createdAt)).limit(limit).offset((page - 1) * limit);

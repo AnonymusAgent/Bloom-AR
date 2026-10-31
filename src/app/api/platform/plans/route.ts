@@ -16,7 +16,9 @@ export async function POST(req: NextRequest) {
 }
 export async function DELETE(req: NextRequest) {
   const u = await requirePlatformAdmin(); if (!u) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  const { id } = await req.json(); if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+  const body = await req.json().catch(() => ({} as Record<string, string>));
+  const id = req.nextUrl.searchParams.get('id') || body.id;
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
   // Soft-disable instead of deleting so existing subscriptions keep their plan reference.
   await db.update(plans).set({ isActive: false }).where(eq(plans.id, id));
   return NextResponse.json({ success: true, message: 'Plan disabled (existing subscriptions unaffected).' });

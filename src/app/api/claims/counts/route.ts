@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, users } from '@/db/schema';
-import { eq, sql, and, or, inArray, gte } from 'drizzle-orm';
+import { eq, sql, and, or, inArray, gte, isNull } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import { cleanUuid } from '@/lib/sanitize';
 
 export async function GET(request: NextRequest) {
   try {
@@ -23,8 +24,11 @@ export async function GET(request: NextRequest) {
       conditions.push(or(inArray(claims.assignedTo, teamMemberIds), eq(claims.assignedBy, user.id)));
     }
 
-    if (practiceId) {
-      conditions.push(eq(claims.practiceId, practiceId));
+    if (practiceId === 'unassigned') {
+      conditions.push(isNull(claims.practiceId));
+    } else if (practiceId) {
+      const pid = cleanUuid(practiceId);
+      if (pid) conditions.push(eq(claims.practiceId, pid));
     }
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;

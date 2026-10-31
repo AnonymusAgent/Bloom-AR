@@ -33,6 +33,10 @@ export async function GET(request: NextRequest) {
         const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(chatMessages)
           .where(and(eq(chatMessages.channelId, ch.id), sql`${chatMessages.createdAt} > ${myMembership[0].lastReadAt}`));
         unreadCount = count;
+      } else if (myMembership[0]) {
+        const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(chatMessages)
+          .where(and(eq(chatMessages.channelId, ch.id), sql`${chatMessages.senderId} <> ${user.id}`));
+        unreadCount = count;
       }
 
       // Display name for direct channels
