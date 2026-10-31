@@ -86,7 +86,7 @@ export function Header({ user, title }: HeaderProps) {
     <header className="h-14 bg-[#0F2D52] px-6 flex items-center justify-between shadow-md relative z-30">
       {/* Left: Title */}
       <div>
-        <h1 className="text-white font-bold text-lg tracking-tight">Account Receivable</h1>
+        <h1 className="text-white font-bold text-lg tracking-tight">{title || 'BloomAR Manager'}</h1>
       </div>
 
       {/* Right: Notifications + User */}
