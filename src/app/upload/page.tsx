@@ -575,7 +575,7 @@ export default function UploadPage() {
             <Card>
               <CardHeader
                 title="Review & Adjust Column Mappings"
-                subtitle="Verify how columns from your spreadsheet map to AR Manager claims fields. Unmapped columns are safely stored as additional reference data."
+                subtitle="Verify how columns from your spreadsheet map to BloomAR Manager claims fields. Unmapped columns are safely stored as additional reference data."
               />
 
               <div className="overflow-x-auto border border-[#E5E7EB] rounded-xl">

@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
 
       const result = await sendEmail({
         to: targetUser.email,
-        subject: `AR Manager Daily Digest - ${new Date().toLocaleDateString()}`,
+        subject: `BloomAR Manager Daily Digest - ${new Date().toLocaleDateString()}`,
         html,
       });
 

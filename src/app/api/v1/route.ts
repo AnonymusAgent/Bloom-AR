@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
   return NextResponse.json({
-    name: 'AR Manager External API',
+    name: 'BloomAR Manager External API',
     version: '1.0.0',
     documentation: '/api/v1/docs',
     endpoints: {

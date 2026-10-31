@@ -14,7 +14,7 @@ function Inner(){
     <div key={k}><label className="text-sm font-medium" htmlFor={k}>{label}</label>
     <input id={k} type={type} required={required} value={(f as unknown as Record<string,string>)[k]} onChange={e=>setF({...f,[k]:e.target.value})} className="mt-1 w-full border rounded-lg px-3 py-2"/></div>);
   return <main className="min-h-screen bg-slate-100 flex justify-center p-5"><form onSubmit={submit} className="bg-white rounded-2xl shadow p-8 w-full max-w-lg h-fit">
-    <Link href="/" className="font-extrabold text-[#0F2D52]">AR Manager</Link><h1 className="text-2xl font-bold mt-4">Create your account</h1>
+    <Link href="/" className="font-extrabold text-[#0F2D52]">BloomAR Manager</Link><h1 className="text-2xl font-bold mt-4">Create your account</h1>
     <p className="text-sm text-slate-600 mt-1">Your organization gets its own isolated workspace and trial.</p>
     <div className="space-y-3 mt-6">
       {field('firstName','First name')}{field('lastName','Last name','text',false)}{field('email','Work email','email')}{field('password','Password (10+ characters)','password')}{field('organizationName','Organization / practice name')}{field('orgType','Organization type')}{field('country','Country','text',false)}{field('timezone','Time zone','text',false)}

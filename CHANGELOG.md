@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the **AR Manager — Medical Billing AR Management System** will be documented in this file.
+All notable changes to the **BloomAR Manager — Medical Billing AR Management System** will be documented in this file.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 

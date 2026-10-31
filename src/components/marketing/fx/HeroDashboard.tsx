@@ -13,11 +13,11 @@ export default function HeroDashboard() {
   const chip = 'rounded-xl px-3.5 py-2.5 text-xs font-semibold shadow-2xl backdrop-blur';
   return (
     <div className="mkt-scene mx-auto w-full max-w-[520px]" onMouseMove={onMove} onMouseLeave={reset} role="img"
-      aria-label="Illustration of the AR Manager workspace: AR aging, work queue and denial routing">
+      aria-label="Illustration of the BloomAR Manager workspace: AR aging, work queue and denial routing">
       <div ref={ref} className="mkt-preserve relative transition-transform duration-300 ease-out" style={{ transform: 'rotateX(10deg) rotateY(-14deg)' }}>
         {/* main dashboard panel */}
         <div className="relative rounded-2xl bg-[#0F2D52] p-5 text-white shadow-[0_40px_80px_-20px_rgba(15,45,82,.55)] ring-1 ring-white/20" style={{ transform: 'translateZ(30px)' }}>
-          <div className="flex items-center justify-between"><p className="font-bold text-sm">AR Manager — Workspace</p><span className="flex gap-1.5">{['#f87171','#fbbf24','#34d399'].map(c => <i key={c} className="h-2.5 w-2.5 rounded-full" style={{ background: c }} />)}</span></div>
+          <div className="flex items-center justify-between"><p className="font-bold text-sm">BloomAR Manager — Workspace</p><span className="flex gap-1.5">{['#f87171','#fbbf24','#34d399'].map(c => <i key={c} className="h-2.5 w-2.5 rounded-full" style={{ background: c }} />)}</span></div>
           <div className="mt-4 grid grid-cols-3 gap-2.5 text-center">
             {[['AR balance', '$284k'], ['0–30 days', '62%'], ['Denials', '18']].map(([l, v]) => <div key={l} className="rounded-lg bg-white/10 px-2 py-3"><p className="text-base font-extrabold">{v}</p><p className="text-[10px] text-white/65">{l}</p></div>)}
           </div>

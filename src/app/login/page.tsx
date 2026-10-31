@@ -155,7 +155,7 @@ export default function LoginPage() {
           <div className="flex justify-center mb-4">
             <BrandMark size="lg" surface="light" />
           </div>
-          <h1 className="text-3xl font-bold text-white">AR Manager</h1>
+          <h1 className="text-3xl font-bold text-white">BloomAR Manager</h1>
           <p className="text-blue-200 mt-2">Medical Billing AR Management System</p>
         </div>
 

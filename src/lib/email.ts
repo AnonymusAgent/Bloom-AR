@@ -31,7 +31,7 @@ export interface EmailOptions {
 export async function sendEmail(options: EmailOptions): Promise<{ success: boolean; messageId?: string; preview?: unknown }> {
   try {
     const t = await getTransporter();
-    const from = process.env.SMTP_FROM || 'AR Manager <noreply@armanager.com>';
+    const from = process.env.SMTP_FROM || 'BloomAR Manager <noreply@bloomar.com>';
 
     const result = await t.sendMail({ from, to: options.to, subject: options.subject, html: options.html, text: options.text });
 
@@ -63,7 +63,7 @@ export function buildDigestHtml(data: {
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f1f5f9;margin:0;padding:20px;">
 <div style="max-width:600px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1);">
   <div style="background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white;padding:24px 32px;">
-    <h1 style="margin:0;font-size:22px;">AR Manager Daily Digest</h1>
+    <h1 style="margin:0;font-size:22px;">BloomAR Manager Daily Digest</h1>
     <p style="margin:8px 0 0;opacity:.85;">Hello, ${data.userName}</p>
   </div>
   <div style="padding:24px 32px;">

@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 type Prefs = { text: boolean; contrast: boolean; motion: boolean };
-const KEY = 'ar-manager-a11y';
+const KEY = 'bloomar-a11y';
 function apply(p: Prefs) {
   const el = document.documentElement;
   el.classList.toggle('a11y-large-text', p.text);

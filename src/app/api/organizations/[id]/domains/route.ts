@@ -10,7 +10,7 @@ export async function GET(_r: NextRequest, { params }: { params: Promise<{id:str
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   const { id } = await params; if (!await requireMembership(user.id, id, ['owner','admin','super_admin'])) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   const rows = await db.select().from(organizationDomains).where(eq(organizationDomains.organizationId, id));
-  return NextResponse.json({ domains: rows.map(d=>({...d, verificationTokenHash: undefined, dnsRecord: d.verificationStatus!=='verified' ? { type:'TXT', host:`_armanager-verify.${d.hostname}`, value:`armanager-verification=${d.verificationTokenPlain}` } : undefined })) });
+  return NextResponse.json({ domains: rows.map(d=>({...d, verificationTokenHash: undefined, dnsRecord: d.verificationStatus!=='verified' ? { type:'TXT', host:`_bloomar-verify.${d.hostname}`, value:`bloomar-verification=${d.verificationTokenPlain}` } : undefined })) });
 }
 export async function POST(req: NextRequest, { params }: { params: Promise<{id:string}> }) {
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -20,9 +20,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{id:s
     const [d] = await db.select().from(organizationDomains).where(eq(organizationDomains.hostname, String(hostname).toLowerCase())).limit(1);
     if (!d || d.organizationId !== id) return NextResponse.json({ error: 'Domain not found' }, { status: 404 });
     try {
-      const records = await dns.resolveTxt(`_armanager-verify.${d.hostname}`);
+      const records = await dns.resolveTxt(`_bloomar-verify.${d.hostname}`);
       const flat = records.flat().join(' ');
-      if (!flat.includes(`armanager-verification=${d.verificationTokenPlain}`)) return NextResponse.json({ error: 'Verification TXT record not found yet. DNS can take time to propagate — try again shortly.', verified: false }, { status: 200 });
+      if (!flat.includes(`bloomar-verification=${d.verificationTokenPlain}`)) return NextResponse.json({ error: 'Verification TXT record not found yet. DNS can take time to propagate — try again shortly.', verified: false }, { status: 200 });
     } catch { return NextResponse.json({ error: 'Could not resolve DNS for that hostname. Add the TXT record and retry.', verified: false }, { status: 200 }); }
     // Verified by real DNS only — also requires hosting config before we claim HTTPS is live.
     const hostingConfigured = Boolean(process.env.VERCEL_TOKEN && process.env.VERCEL_PROJECT_ID);
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{id:s
   if (taken) return NextResponse.json({ error: 'That hostname is already assigned to an organization' }, { status: 409 });
   const plain = makeToken().slice(0, 32);
   const [d] = await db.insert(organizationDomains).values({ organizationId: id, hostname: host, verificationTokenHash: hashToken(plain), verificationTokenPlain: plain }).returning();
-  return NextResponse.json({ domain: d, dnsRecord: { type: 'TXT', host: `_armanager-verify.${host}`, value: `armanager-verification=${plain}` } }, { status: 201 });
+  return NextResponse.json({ domain: d, dnsRecord: { type: 'TXT', host: `_bloomar-verify.${host}`, value: `bloomar-verification=${plain}` } }, { status: 201 });
 }
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{id:string}> }) {
   const user = await getCurrentUser(); if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

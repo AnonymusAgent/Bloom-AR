@@ -4,7 +4,7 @@ import { getSiteContent } from '@/lib/site-content';
 import Reveal from '@/components/marketing/fx/Reveal';
 import TiltCard from '@/components/marketing/fx/TiltCard';
 export const dynamic = 'force-dynamic';
-export const metadata = { title: 'Features — AR Manager', description: 'Claims, work queues, denial management, authorizations, payments, reporting and team collaboration for medical billing teams.' };
+export const metadata = { title: 'Features — BloomAR Manager', description: 'Claims, work queues, denial management, authorizations, payments, reporting and team collaboration for medical billing teams.' };
 
 const MODULES = [
   { icon: '🧾', title: 'Claims management', points: ['Full claim lifecycle with 15 statuses', 'Search, filter, sort & bulk assignment', 'Excel/CSV import with smart column mapping'], outcome: 'Every claim accounted for — nothing sits untouched.' },
