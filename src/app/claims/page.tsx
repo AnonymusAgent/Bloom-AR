@@ -1,6 +1,6 @@
 'use client';
-import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
@@ -62,7 +62,11 @@ function WorkflowBadge({ ws }: { ws: string | null }) {
   return <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${s.bg} ${s.tx}`}>{s.l}</span>;
 }
 
-export default function ClaimsPage() {
+const VALID_MAIN_TABS: MainTab[] = ['unworked', 'workable', 'pending_approval', 'worked', 'record'];
+const VALID_RECORD_FILTERS = new Set(RECORD_FILTERS.map((f) => f.key));
+
+function ClaimsPageContent() {
+  const searchParams = useSearchParams();
   const [claims, setClaims] = useState<Claim[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -83,6 +87,23 @@ export default function ClaimsPage() {
   const [practiceFilter, setPracticeFilter] = useState('');
   const [myPractices, setMyPractices] = useState<Array<{ id: string; name: string; code: string }>>([]);
   const router = useRouter();
+
+  // Sync active tab & record filter from sidebar search deep-links (?tab=...&filter=...)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab') as MainTab | null;
+    const filterParam = searchParams.get('filter');
+    if (tabParam && VALID_MAIN_TABS.includes(tabParam)) {
+      setMainTab(tabParam);
+      setPage(1);
+      setSelectedClaims([]);
+    }
+    if (filterParam && VALID_RECORD_FILTERS.has(filterParam)) {
+      setRecordFilter(filterParam);
+      setPage(1);
+    } else if (tabParam === 'record' && !filterParam) {
+      setRecordFilter('all');
+    }
+  }, [searchParams]);
 
   // Fetch user's authorized practices
   useEffect(() => {
@@ -315,5 +336,13 @@ export default function ClaimsPage() {
         </div>
       </Modal>
     </AppLayout>
+  );
+}
+
+export default function ClaimsPage() {
+  return (
+    <Suspense fallback={<AppLayout title="Account Receivable"><MedicalInlineLoader message="Loading claims..." /></AppLayout>}>
+      <ClaimsPageContent />
+    </Suspense>
   );
 }

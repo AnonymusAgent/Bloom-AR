@@ -1,13 +1,22 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 const inp='w-full border rounded-lg px-3 py-2 text-sm'; const lbl='block text-xs font-semibold text-slate-500 mt-3';
 const card='bg-white rounded-xl shadow-sm border p-5'; const btn='px-4 py-2 bg-[#2563EB] text-white rounded-lg text-sm font-semibold disabled:opacity-50';
-export default function AccountSettings(){
-  const [tab,setTab]=useState<'profile'|'security'|'preferences'|'organizations'>('profile');
+type AccountTab = 'profile'|'security'|'preferences'|'organizations';
+const VALID_ACCOUNT_TABS: AccountTab[] = ['profile','security','preferences','organizations'];
+
+function AccountSettingsContent(){
+  const searchParams = useSearchParams();
+  const [tab,setTab]=useState<AccountTab>('profile');
   const [profile,setProfile]=useState<any>(null); const [sessions,setSessions]=useState<any[]>([]); const [orgs,setOrgs]=useState<any[]>([]); const [msg,setMsg]=useState('');
   const [pw,setPw]=useState({currentPassword:'',newPassword:'',confirmPassword:''});
   const load=async()=>{ const p=await (await fetch('/api/profile')).json(); setProfile(p); setSessions((await (await fetch('/api/account/sessions')).json()).sessions||[]); setOrgs((await (await fetch('/api/organizations')).json()).organizations||[]); };
   useEffect(()=>{load();},[]);
+  useEffect(()=>{
+    const t = searchParams.get('tab') as AccountTab | null;
+    if (t && VALID_ACCOUNT_TABS.includes(t)) setTab(t);
+  },[searchParams]);
   if(!profile?.user) return <main className="p-8">Loading account… (sign in first)</main>;
   const u=profile.user; const prefs=u.preferences||{};
   const saveProfile=async()=>{ const r=await fetch('/api/profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({firstName:u.firstName,lastName:u.lastName,phone:u.phone,avatarUrl:u.avatarUrl})}); setMsg(r.ok?'Profile saved.':'Failed to save profile.'); };
@@ -37,4 +46,8 @@ export default function AccountSettings(){
     {tab==='organizations' && <section className={card}><h2 className="font-bold">My organizations</h2><ul className="text-sm mt-2 space-y-2">{orgs.map(o=><li key={o.id} className="border rounded-lg p-3 flex justify-between"><span><b>{o.name}</b> ({o.slug}) — {o.status}</span><a className="text-[#2563EB]" href="/settings/organization">Manage</a></li>)}{!orgs.length && <li className="text-slate-500">You are not a member of any organization yet. <a className="text-[#2563EB]" href="/register">Create one</a></li>}</ul>
       <div className="flex gap-3 mt-4"><a href="/settings/organization" className="text-sm text-[#2563EB] font-semibold">Organization settings & team →</a><a href="/settings/billing" className="text-sm text-[#2563EB] font-semibold">Billing & plan →</a><a href="/onboarding" className="text-sm text-[#2563EB] font-semibold">Onboarding →</a></div></section>}
   </div></main>;
+}
+
+export default function AccountSettings(){
+  return <Suspense fallback={<main className="p-8">Loading account…</main>}><AccountSettingsContent /></Suspense>;
 }

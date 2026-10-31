@@ -58,7 +58,13 @@ export function AppLayout({ children, title }: AppLayoutProps) {
   return (
     <div className="min-h-screen bg-[#F5F7FA] flex flex-col">
       <div className="flex flex-1">
-        <Sidebar user={user} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} onLogout={handleLogout} />
+        <Sidebar
+          user={user}
+          collapsed={collapsed}
+          onToggle={() => setCollapsed(!collapsed)}
+          onExpand={() => setCollapsed(false)}
+          onLogout={handleLogout}
+        />
         <div className={`flex-1 flex flex-col transition-all duration-300 ${collapsed ? 'ml-[60px]' : 'ml-[240px]'}`}>
           <Header user={user} title={title} />
           <main className="flex-1 p-5">{children}</main>

@@ -1,17 +1,24 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 const inp = 'w-full border rounded-lg px-3 py-2 text-sm';
 const lbl = 'block text-xs font-semibold text-slate-500 mt-3';
 const btn = 'px-4 py-2 bg-[#2563EB] text-white rounded-lg text-sm font-semibold disabled:opacity-50';
 const card = 'bg-white rounded-xl shadow-sm border p-5';
 type Tab = 'overview'|'website'|'plans'|'organizations'|'users'|'leads'|'system';
+const VALID_PLATFORM_TABS: Tab[] = ['overview','website','plans','organizations','users','leads','system'];
 
-export default function PlatformAdmin() {
+function PlatformAdminContent() {
+  const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>('overview');
   const [data, setData] = useState<any>(null); const [err, setErr] = useState(''); const [msg, setMsg] = useState('');
   const load = useCallback(async () => { const r = await fetch('/api/platform/admin'); if (!r.ok) { setErr('Forbidden — platform admin access (users.is_platform_admin = true) is required. This is separate from organization admin and does not grant access to customer healthcare data.'); return; } setData(await r.json()); }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const t = searchParams.get('tab') as Tab | null;
+    if (t && VALID_PLATFORM_TABS.includes(t)) setTab(t);
+  }, [searchParams]);
   if (err) return <main className="min-h-screen bg-slate-100 p-8"><div className={`${card} max-w-xl mx-auto`}><h1 className="font-bold text-lg">Platform Admin</h1><p className="text-red-600 text-sm mt-2">{err}</p><p className="text-sm text-slate-600 mt-3">Ask an operator to either set <code className="bg-slate-100 px-1">PLATFORM_ADMIN_EMAILS</code> in the hosting environment to your sign-in email (comma-separated for multiple admins) and redeploy, run <code className="bg-slate-100 px-1">scripts/bootstrap-platform-admin.mjs</code> with private env credentials, or set <code className="bg-slate-100 px-1">users.is_platform_admin=true</code> for your account in the database. Then sign out and back in.</p></div></main>;
   if (!data) return <main className="p-8">Loading platform admin…</main>;
   const tabs: [Tab,string][] = [['overview','Overview'],['website','🌐 Website'],['plans','Plans & Pricing'],['organizations','Organizations'],['users','Users'],['leads','Leads Inbox'],['system','Domains & System']];
@@ -96,4 +103,8 @@ function System({ data }: any) {
   const Row = ({k,v}:any) => <div className="flex justify-between border-b py-2 text-sm"><span>{k}</span><b>{v}</b></div>;
   return <div className="grid md:grid-cols-2 gap-5"><section className={card}><h2 className="font-bold">Integrations (status only — secrets never shown)</h2><div className="mt-2"><Row k="Email (SMTP)" v={i.emailConfigured?'Configured ✓':'Not configured — set SMTP_*'} /><Row k="Payments (Stripe)" v={i.paymentsConfigured?'Configured ✓':'Not configured — set STRIPE_SECRET_KEY'} /><Row k="Stripe webhook" v={i.webhookConfigured?'Configured ✓':'Not configured'} /><Row k="Root domain" v={i.rootDomain||'Not set'} /><Row k="App URL" v={i.appUrl||'Not set'} /></div><p className="text-xs text-slate-500 mt-3">Set these in your hosting environment variables, then redeploy. Full guide: docs/SAAS_SETUP.md</p></section>
   <section className={card}><h2 className="font-bold">Custom domains ({data.domains?.length||0})</h2><ul className="text-sm mt-2 space-y-2">{(data.domains||[]).map((d:any)=><li key={d.id} className="border rounded-lg p-2"><b>{d.hostname}</b> — {d.verificationStatus} · hosting: {d.hostingStatus} · TLS: {d.tlsStatus}</li>)}{!data.domains?.length && <li className="text-slate-500">No custom domains yet.</li>}</ul></section></div>;
+}
+
+export default function PlatformAdmin() {
+  return <Suspense fallback={<main className="p-8">Loading platform admin…</main>}><PlatformAdminContent /></Suspense>;
 }
