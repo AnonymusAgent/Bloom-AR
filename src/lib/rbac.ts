@@ -1,13 +1,13 @@
 import { db } from '@/db';
 import { users, userPracticeAssignments, claims } from '@/db/schema';
-import { eq, inArray, sql, and, or } from 'drizzle-orm';
+import { eq, inArray, and, isNotNull } from 'drizzle-orm';
 import type { User } from '@/db/schema';
 
 /**
  * Get the list of practice IDs a user is authorized to access.
  * Admins/Supervisors/Managers get all practices.
- * Team leads get practices of their team members + their own.
- * Regular users get only their assigned practices.
+ * Team leads get practices assigned to them/their team + practices of claims assigned to them/their team.
+ * Regular users get their assigned practices + practices of claims assigned directly to them.
  */
 export async function getUserAuthorizedPracticeIds(user: User): Promise<string[] | 'all'> {
   if (['administrator', 'supervisor', 'manager'].includes(user.role)) {
@@ -15,21 +15,46 @@ export async function getUserAuthorizedPracticeIds(user: User): Promise<string[]
   }
 
   if (['senior_lead', 'team_lead'].includes(user.role)) {
-    // Own practices + team members' practices
     const teamMembers = await db.select({ id: users.id }).from(users).where(eq(users.teamLeadId, user.id));
-    const allUserIds = [user.id, ...teamMembers.map(m => m.id)];
+    const allUserIds = [user.id, ...teamMembers.map((m) => m.id)];
 
-    const assignments = await db.select({ practiceId: userPracticeAssignments.practiceId })
-      .from(userPracticeAssignments).where(inArray(userPracticeAssignments.userId, allUserIds));
+    const [assignments, claimPractices] = await Promise.all([
+      db
+        .select({ practiceId: userPracticeAssignments.practiceId })
+        .from(userPracticeAssignments)
+        .where(inArray(userPracticeAssignments.userId, allUserIds)),
+      db
+        .selectDistinct({ practiceId: claims.practiceId })
+        .from(claims)
+        .where(and(inArray(claims.assignedTo, allUserIds), isNotNull(claims.practiceId))),
+    ]);
 
-    return [...new Set(assignments.map(a => a.practiceId))];
+    return [
+      ...new Set([
+        ...assignments.map((a) => a.practiceId),
+        ...claimPractices.map((c) => c.practiceId).filter((id): id is string => Boolean(id)),
+      ]),
+    ];
   }
 
-  // Regular user — only their assigned practices
-  const assignments = await db.select({ practiceId: userPracticeAssignments.practiceId })
-    .from(userPracticeAssignments).where(eq(userPracticeAssignments.userId, user.id));
+  // Regular user — explicit practice assignments + practices from claims assigned to them
+  const [assignments, claimPractices] = await Promise.all([
+    db
+      .select({ practiceId: userPracticeAssignments.practiceId })
+      .from(userPracticeAssignments)
+      .where(eq(userPracticeAssignments.userId, user.id)),
+    db
+      .selectDistinct({ practiceId: claims.practiceId })
+      .from(claims)
+      .where(and(eq(claims.assignedTo, user.id), isNotNull(claims.practiceId))),
+  ]);
 
-  return assignments.map(a => a.practiceId);
+  return [
+    ...new Set([
+      ...assignments.map((a) => a.practiceId),
+      ...claimPractices.map((c) => c.practiceId).filter((id): id is string => Boolean(id)),
+    ]),
+  ];
 }
 
 /**
@@ -45,7 +70,7 @@ export async function getUserAuthorizedUserIds(user: User): Promise<string[] | '
 
   if (['senior_lead', 'team_lead'].includes(user.role)) {
     const teamMembers = await db.select({ id: users.id }).from(users).where(eq(users.teamLeadId, user.id));
-    return [user.id, ...teamMembers.map(m => m.id)];
+    return [user.id, ...teamMembers.map((m) => m.id)];
   }
 
   // Regular user — only themselves

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { practices, userPracticeAssignments, users } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { getCurrentUser, canAssignPractices } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
@@ -41,6 +41,24 @@ export async function POST(
 
     if (!assignee) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    const [existingAssignment] = await db
+      .select()
+      .from(userPracticeAssignments)
+      .where(and(eq(userPracticeAssignments.practiceId, id), eq(userPracticeAssignments.userId, userId)))
+      .limit(1);
+
+    if (existingAssignment) {
+      const [updatedAssignment] = await db
+        .update(userPracticeAssignments)
+        .set({
+          responsibilities: responsibilities || existingAssignment.responsibilities || [],
+          isPrimary: isPrimary ?? existingAssignment.isPrimary,
+        })
+        .where(eq(userPracticeAssignments.id, existingAssignment.id))
+        .returning();
+      return NextResponse.json({ assignment: updatedAssignment, updated: true });
     }
 
     const [assignment] = await db

@@ -12,6 +12,7 @@ import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
 
 interface CodingReq {
   id: string; claimId: string; claimNumber: string|null; patientName: string|null; status: string;
+  practiceName?: string|null;
   denialReason: string|null; comments: string|null; correctionNotes: string|null;
   senderName: string; assigneeName: string|null; createdAt: string;
 }
@@ -73,15 +74,16 @@ export default function CodingPage() {
         </div>
         <Table>
           <TableHead><TableRow>
-            <TableHeader>Claim #</TableHeader><TableHeader>Patient</TableHeader><TableHeader>Denial Reason</TableHeader>
+            <TableHeader>Claim #</TableHeader><TableHeader>Practice</TableHeader><TableHeader>Patient</TableHeader><TableHeader>Denial Reason</TableHeader>
             <TableHeader>Sent By</TableHeader><TableHeader>Status</TableHeader><TableHeader>Date</TableHeader><TableHeader>Actions</TableHeader>
           </TableRow></TableHead>
           <TableBody>
-            {loading ? <TableRow><TableCell colSpan={7} className="text-center py-8">Loading...</TableCell></TableRow>
+            {loading ? <TableRow><TableCell colSpan={8} className="text-center py-8">Loading...</TableCell></TableRow>
             : requests.length===0 ? <TableEmpty message="No coding requests"/>
             : requests.map(r=>(
               <TableRow key={r.id}>
                 <TableCell><button className="text-blue-600 hover:underline font-medium" onClick={()=>router.push(`/claims/${r.claimId}`)}>{r.claimNumber||'-'}</button></TableCell>
+                <TableCell className="text-slate-700 font-medium">{r.practiceName||'-'}</TableCell>
                 <TableCell>{r.patientName||'-'}</TableCell>
                 <TableCell><span className="text-sm text-slate-600 line-clamp-2">{r.denialReason||'-'}</span></TableCell>
                 <TableCell>{r.senderName}</TableCell>

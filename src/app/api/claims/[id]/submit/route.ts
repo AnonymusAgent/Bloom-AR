@@ -41,11 +41,16 @@ export async function POST(
       );
     }
 
+    const now = new Date();
     const [updatedClaim] = await db
       .update(claims)
       .set({
         status: 'submitted_for_review',
-        updatedAt: new Date(),
+        workflowStatus: 'pending_approval',
+        submittedForApprovalAt: now,
+        workedBy: claim.workedBy || user.id,
+        workedDate: claim.workedDate || now,
+        updatedAt: now,
       })
       .where(eq(claims.id, id))
       .returning();

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, users, denialCodes } from '@/db/schema';
+import { claims, users, practices, denialCodes } from '@/db/schema';
 import { sql, asc } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
@@ -33,16 +33,19 @@ export async function POST(request: NextRequest) {
     await db.execute(sql`UPDATE billing_tasks SET claim_id = NULL WHERE claim_id IN (SELECT id FROM claims)`);
     await db.execute(sql`DELETE FROM claims`);
 
-    // Assign test claims round-robin across active users so queues are testable.
+    // Assign test claims round-robin across active users (and active practices if any exist) so queues and practice filters are testable.
     const activeUsers = await db.select({ id: users.id }).from(users).where(sql`${users.isActive} = true`).orderBy(asc(users.createdAt));
     const assignees = activeUsers.length ? activeUsers : [{ id: user.id }];
+    const activePractices = await db.select({ id: practices.id }).from(practices).where(sql`${practices.isActive} = true`).orderBy(asc(practices.createdAt));
     const deniedCodes = await db.select({ id: denialCodes.id }).from(denialCodes).limit(10);
     const rows = generateTestClaims(50).map((c, i) => ({
       ...c,
       status: c.status as typeof claims.status.enumValues[number],
+      practiceId: activePractices.length ? activePractices[i % activePractices.length].id : null,
       assignedTo: ['new', 'closed'].includes(c.status) ? null : assignees[i % assignees.length].id,
       assignedBy: user.id,
       assignedAt: ['new', 'closed'].includes(c.status) ? null : new Date(),
+      workedBy: ['working', 'pending_approval', 'approved', 'rework'].includes(c.workflowStatus) ? assignees[i % assignees.length].id : null,
       denialCodeId: c.denialReason && deniedCodes.length ? deniedCodes[i % deniedCodes.length].id : null,
     }));
     const inserted = await db.insert(claims).values(rows).returning({ id: claims.id, claimNumber: claims.claimNumber });

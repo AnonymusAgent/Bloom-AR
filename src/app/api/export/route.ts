@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, authorizations, billingTasks, codingRequests, auditLogs, users } from '@/db/schema';
+import { claims, practices, authorizations, billingTasks, codingRequests, auditLogs, users } from '@/db/schema';
 import { eq, and, gte, lte, ilike, or, desc, inArray, sql } from 'drizzle-orm';
 import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
 import * as XLSX from 'xlsx';
@@ -33,6 +33,7 @@ export async function GET(request: NextRequest) {
 
       const data = await db.select({
         claimNumber: claims.claimNumber, accountNumber: claims.accountNumber,
+        practiceId: claims.practiceId,
         patientName: claims.patientName, dateOfService: claims.dateOfService,
         cptCodes: claims.cptCodes, provider: claims.provider, insurance: claims.insurance,
         payer: claims.payer, billedAmount: claims.billedAmount, paidAmount: claims.paidAmount,
@@ -40,8 +41,14 @@ export async function GET(request: NextRequest) {
         createdAt: claims.createdAt,
       }).from(claims).where(conds.length ? and(...conds) : undefined).orderBy(desc(claims.createdAt)).limit(5000);
 
+      const pIds = Array.from(new Set(data.map(r => r.practiceId).filter((id): id is string => Boolean(id))));
+      const pRows = pIds.length > 0
+        ? await db.select({ id: practices.id, name: practices.name, code: practices.code }).from(practices).where(inArray(practices.id, pIds))
+        : [];
+      const pMap = new Map(pRows.map(p => [p.id, `${p.code} — ${p.name}`]));
+
       rows = data.map(r => ({
-        'Claim #': r.claimNumber, 'Account #': r.accountNumber || '', Patient: r.patientName || '',
+        'Claim #': r.claimNumber, Practice: (r.practiceId ? pMap.get(r.practiceId) : '') || '', 'Account #': r.accountNumber || '', Patient: r.patientName || '',
         DOS: r.dateOfService || '', 'CPT Codes': r.cptCodes || '', Provider: r.provider || '',
         Insurance: r.insurance || '', Payer: r.payer || '',
         'Billed Amount': r.billedAmount ? `$${r.billedAmount}` : '', 'Paid Amount': r.paidAmount ? `$${r.paidAmount}` : '',

@@ -1,45 +1,78 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, users } from '@/db/schema';
-import { eq, sql, and, inArray, gte } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { eq, sql, and, or, inArray, gte } from 'drizzle-orm';
+import { getCurrentUser } from '@/lib/auth';
+import { ensureSaaSColumns } from '@/lib/db-schema';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    await ensureSaaSColumns();
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const isSuper = isSupervisorOrAbove(user.role) || user.role === 'team_lead';
+    const practiceId = request.nextUrl.searchParams.get('practiceId');
+    const conditions = [];
+
+    // Match GET /api/claims RBAC exactly
+    if (['ar_executive', 'billing_user'].includes(user.role)) {
+      conditions.push(eq(claims.assignedTo, user.id));
+    } else if (['team_lead', 'senior_lead'].includes(user.role)) {
+      const teamMembers = await db.select({ id: users.id }).from(users).where(eq(users.teamLeadId, user.id));
+      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.id)];
+      conditions.push(or(inArray(claims.assignedTo, teamMemberIds), eq(claims.assignedBy, user.id)));
+    }
+
+    if (practiceId) {
+      conditions.push(eq(claims.practiceId, practiceId));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
     // Workflow counts
-    const wfCounts = await db.select({
-      workflowStatus: claims.workflowStatus,
-      count: sql<number>`count(*)::int`,
-    }).from(claims).where(
-      !isSuper ? eq(claims.assignedTo, user.id) : undefined
-    ).groupBy(claims.workflowStatus);
+    const wfCounts = await db
+      .select({
+        workflowStatus: claims.workflowStatus,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(claims)
+      .where(whereClause)
+      .groupBy(claims.workflowStatus);
 
     const wf: Record<string, number> = {};
-    wfCounts.forEach(c => { wf[c.workflowStatus || 'unworked'] = c.count; });
+    wfCounts.forEach((c) => {
+      wf[c.workflowStatus || 'unworked'] = c.count;
+    });
 
     // Insurance status counts (for Record tab)
-    const insCounts = await db.select({
-      claimInsuranceStatus: claims.claimInsuranceStatus,
-      count: sql<number>`count(*)::int`,
-    }).from(claims).where(
-      !isSuper ? eq(claims.assignedTo, user.id) : undefined
-    ).groupBy(claims.claimInsuranceStatus);
+    const insCounts = await db
+      .select({
+        claimInsuranceStatus: claims.claimInsuranceStatus,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(claims)
+      .where(whereClause)
+      .groupBy(claims.claimInsuranceStatus);
 
     const ins: Record<string, number> = {};
-    insCounts.forEach(c => { ins[c.claimInsuranceStatus || 'none'] = c.count; });
+    insCounts.forEach((c) => {
+      ins[c.claimInsuranceStatus || 'none'] = c.count;
+    });
 
     // Today's stats for the user
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const [todayWorked] = await db.select({ count: sql<number>`count(*)::int` }).from(claims)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const [todayWorked] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(claims)
       .where(and(eq(claims.workedBy, user.id), gte(claims.workedDate, today)));
-    const [todaySubmitted] = await db.select({ count: sql<number>`count(*)::int` }).from(claims)
+    const [todaySubmitted] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(claims)
       .where(and(eq(claims.workedBy, user.id), gte(claims.submittedForApprovalAt, today)));
-    const [todayApproved] = await db.select({ count: sql<number>`count(*)::int` }).from(claims)
+    const [todayApproved] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(claims)
       .where(and(eq(claims.approvedBy, user.id), gte(claims.approvedAt, today)));
 
     return NextResponse.json({

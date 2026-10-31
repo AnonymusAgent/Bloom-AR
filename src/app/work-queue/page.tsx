@@ -7,7 +7,7 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Input';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
-import { ClipboardList, Clock, DollarSign, ExternalLink, Play } from 'lucide-react';
+import { Building2, ClipboardList, Clock, DollarSign, ExternalLink, Play } from 'lucide-react';
 
 interface Claim {
   id: string;
@@ -19,14 +19,18 @@ interface Claim {
   billedAmount: string | null;
   balance: string | null;
   status: string;
+  workflowStatus: string | null;
   priority: string | null;
+  practiceId: string | null;
+  practiceName: string | null;
+  practiceCode: string | null;
   createdAt: string;
   assignedAt: string | null;
 }
 
 const STATUS_OPTIONS = [
   { value: '', label: 'All My Claims' },
-  { value: 'assigned', label: 'Assigned' },
+  { value: 'new,assigned', label: 'Assigned / Ready' },
   { value: 'in_progress', label: 'In Progress' },
   { value: 'rework_required', label: 'Rework Required' },
 ];
@@ -44,10 +48,10 @@ export default function WorkQueuePage() {
       if (statusFilter) {
         params.set('status', statusFilter);
       } else {
-        params.set('status', 'assigned,in_progress,rework_required');
+        params.set('status', 'new,assigned,in_progress,rework_required');
       }
 
-      const res = await fetch(`/api/claims?${params}`);
+      const res = await fetch(`/api/claims?${params}`, { credentials: 'include' });
       const data = await res.json();
       if (res.ok) {
         setClaims(data.claims);
@@ -65,14 +69,16 @@ export default function WorkQueuePage() {
 
   const handleStartWork = async (claimId: string) => {
     try {
-      await fetch(`/api/claims/${claimId}`, {
-        method: 'PATCH',
+      await fetch(`/api/claims/${claimId}/workflow`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'in_progress' }),
+        credentials: 'include',
+        body: JSON.stringify({ action: 'start_working' }),
       });
       router.push(`/claims/${claimId}`);
     } catch (error) {
       console.error('Failed to start work:', error);
+      router.push(`/claims/${claimId}`);
     }
   };
 
@@ -95,11 +101,18 @@ export default function WorkQueuePage() {
     }
   };
 
-  // Group claims by status
+  // Group claims by status/workflow
   const groupedClaims = {
-    rework: claims.filter(c => c.status === 'rework_required'),
-    assigned: claims.filter(c => c.status === 'assigned'),
-    inProgress: claims.filter(c => c.status === 'in_progress'),
+    rework: claims.filter((c) => c.status === 'rework_required' || c.workflowStatus === 'rework'),
+    assigned: claims.filter(
+      (c) =>
+        (c.status === 'assigned' || c.status === 'new') &&
+        c.workflowStatus !== 'rework' &&
+        c.workflowStatus !== 'working'
+    ),
+    inProgress: claims.filter(
+      (c) => c.status === 'in_progress' || c.workflowStatus === 'working'
+    ),
   };
 
   return (
@@ -109,14 +122,14 @@ export default function WorkQueuePage() {
           <ClipboardList className="w-6 h-6 text-slate-400" />
           <div>
             <h2 className="text-lg font-semibold text-slate-900">My Work Queue</h2>
-            <p className="text-sm text-slate-500">{claims.length} claims assigned to you</p>
+            <p className="text-sm text-slate-500">{claims.length} claims in your queue</p>
           </div>
         </div>
         <Select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           options={STATUS_OPTIONS}
-          className="w-44"
+          className="w-48"
         />
       </div>
 
@@ -136,15 +149,15 @@ export default function WorkQueuePage() {
           {/* Rework Required - High Priority */}
           {groupedClaims.rework.length > 0 && (
             <Card className="border-red-200">
-              <CardHeader 
-                title="⚠️ Rework Required" 
+              <CardHeader
+                title="Rework Required"
                 subtitle={`${groupedClaims.rework.length} claim(s) need attention`}
               />
               <div className="space-y-3">
                 {groupedClaims.rework.map((claim) => (
-                  <ClaimCard 
-                    key={claim.id} 
-                    claim={claim} 
+                  <ClaimCard
+                    key={claim.id}
+                    claim={claim}
                     onWork={() => router.push(`/claims/${claim.id}`)}
                     formatCurrency={formatCurrency}
                     getPriorityColor={getPriorityColor}
@@ -157,15 +170,15 @@ export default function WorkQueuePage() {
           {/* Assigned */}
           {groupedClaims.assigned.length > 0 && (
             <Card>
-              <CardHeader 
-                title="📋 Assigned" 
+              <CardHeader
+                title="Assigned"
                 subtitle={`${groupedClaims.assigned.length} claim(s) ready to work`}
               />
               <div className="space-y-3">
                 {groupedClaims.assigned.map((claim) => (
-                  <ClaimCard 
-                    key={claim.id} 
-                    claim={claim} 
+                  <ClaimCard
+                    key={claim.id}
+                    claim={claim}
                     onWork={() => handleStartWork(claim.id)}
                     formatCurrency={formatCurrency}
                     getPriorityColor={getPriorityColor}
@@ -179,15 +192,15 @@ export default function WorkQueuePage() {
           {/* In Progress */}
           {groupedClaims.inProgress.length > 0 && (
             <Card>
-              <CardHeader 
-                title="🔄 In Progress" 
+              <CardHeader
+                title="In Progress"
                 subtitle={`${groupedClaims.inProgress.length} claim(s) being worked`}
               />
               <div className="space-y-3">
                 {groupedClaims.inProgress.map((claim) => (
-                  <ClaimCard 
-                    key={claim.id} 
-                    claim={claim} 
+                  <ClaimCard
+                    key={claim.id}
+                    claim={claim}
                     onWork={() => router.push(`/claims/${claim.id}`)}
                     formatCurrency={formatCurrency}
                     getPriorityColor={getPriorityColor}
@@ -215,20 +228,35 @@ function ClaimCard({
   getPriorityColor: (priority: string | null) => string;
   showStartButton?: boolean;
 }) {
+  const practiceLabel =
+    claim.practiceCode && claim.practiceName
+      ? `${claim.practiceCode} — ${claim.practiceName}`
+      : claim.practiceName || null;
+
   return (
     <div className={`p-4 rounded-lg border ${getPriorityColor(claim.priority)}`}>
       <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-2">
             <span className="font-semibold text-slate-900">{claim.claimNumber}</span>
             <StatusBadge status={claim.status} />
+            {practiceLabel && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">
+                <Building2 className="w-3 h-3" />
+                {practiceLabel}
+              </span>
+            )}
             {claim.priority && claim.priority !== 'normal' && (
               <Badge variant={claim.priority === 'high' ? 'danger' : 'warning'}>
                 {claim.priority}
               </Badge>
             )}
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+            <div>
+              <span className="text-slate-500">Practice:</span>
+              <span className="ml-1 font-medium">{practiceLabel || '-'}</span>
+            </div>
             <div>
               <span className="text-slate-500">Patient:</span>
               <span className="ml-1 font-medium">{claim.patientName || '-'}</span>
@@ -253,7 +281,7 @@ function ClaimCard({
             </div>
           )}
         </div>
-        <div className="flex gap-2 ml-4">
+        <div className="flex gap-2 ml-4 flex-shrink-0">
           {showStartButton ? (
             <Button size="sm" onClick={onWork}>
               <Play className="w-4 h-4 mr-1" />

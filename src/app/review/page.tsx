@@ -15,7 +15,8 @@ import {
   XCircle, 
   RotateCcw,
   DollarSign,
-  User
+  User,
+  Building2,
 } from 'lucide-react';
 
 interface Claim {
@@ -28,6 +29,9 @@ interface Claim {
   balance: string | null;
   status: string;
   assigneeName: string | null;
+  workedByName?: string | null;
+  practiceName?: string | null;
+  practiceCode?: string | null;
   createdAt: string;
 }
 
@@ -62,23 +66,31 @@ export default function ReviewPage() {
 
   const handleReview = async () => {
     if (!selectedClaim) return;
+    if ((reviewAction === 'rework' || reviewAction === 'reject') && !reviewComments.trim()) {
+      alert('Please provide feedback comments before submitting.');
+      return;
+    }
     setSubmitting(true);
 
     try {
       const res = await fetch(`/api/claims/${selectedClaim.id}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           action: reviewAction,
           comments: reviewComments,
         }),
       });
+      const data = await res.json().catch(() => ({}));
 
       if (res.ok) {
         setShowReviewModal(false);
         setSelectedClaim(null);
         setReviewComments('');
         fetchClaims();
+      } else {
+        alert(data.error || 'Failed to review claim');
       }
     } catch (error) {
       console.error('Failed to review claim:', error);
@@ -129,14 +141,26 @@ export default function ReviewPage() {
             <Card key={claim.id}>
               <div className="flex items-start justify-between">
                 <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-3">
+                  <div className="flex items-center gap-3 mb-3 flex-wrap">
                     <span className="text-lg font-semibold text-slate-900">
                       {claim.claimNumber}
                     </span>
                     <StatusBadge status={claim.status} />
+                    {(claim.practiceName || claim.practiceCode) && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">
+                        <Building2 className="w-3.5 h-3.5" />
+                        {claim.practiceCode ? `${claim.practiceCode} — ${claim.practiceName}` : claim.practiceName}
+                      </span>
+                    )}
                   </div>
                   
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+                    <div>
+                      <span className="text-slate-500">Practice:</span>
+                      <p className="font-medium text-slate-900">
+                        {claim.practiceCode ? `${claim.practiceCode} — ${claim.practiceName}` : claim.practiceName || '-'}
+                      </p>
+                    </div>
                     <div>
                       <span className="text-slate-500">Patient:</span>
                       <p className="font-medium text-slate-900">{claim.patientName || '-'}</p>
@@ -157,10 +181,10 @@ export default function ReviewPage() {
                     </div>
                   </div>
 
-                  {claim.assigneeName && (
+                  {(claim.workedByName || claim.assigneeName) && (
                     <div className="flex items-center gap-2 mt-3 text-sm text-slate-500">
                       <User className="w-4 h-4" />
-                      Worked by {claim.assigneeName}
+                      Worked by {claim.workedByName || claim.assigneeName}
                     </div>
                   )}
                 </div>
