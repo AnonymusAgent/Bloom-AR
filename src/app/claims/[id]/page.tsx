@@ -267,6 +267,8 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
   const [reviewComments, setReviewComments] = useState('');
   const [showCoding, setShowCoding] = useState(false);
   const [codingReason, setCodingReason] = useState('');
+  const [codingComments, setCodingComments] = useState('');
+  const [codingAssignSelf, setCodingAssignSelf] = useState(false);
 
   // Activity tab
   const [activeInfoTab, setActiveInfoTab] = useState<'notes' | 'history' | 'documents'>('notes');
@@ -522,7 +524,7 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
     }
   };
 
-  const handleSendToCoding = async () => {
+  const handleSendToCoding = async (openWorkbench = false) => {
     setSaving(true);
     setActionBanner(null);
     try {
@@ -530,7 +532,12 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ claimId: id, denialReason: codingReason }),
+        body: JSON.stringify({
+          claimId: id,
+          denialReason: codingReason,
+          comments: codingComments || undefined,
+          assignedTo: codingAssignSelf ? 'me' : undefined,
+        }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -539,6 +546,12 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
       }
       setShowCoding(false);
       setCodingReason('');
+      setCodingComments('');
+      setCodingAssignSelf(false);
+      if (openWorkbench && d.codingRequest?.id) {
+        router.push(`/coding?requestId=${d.codingRequest.id}&claimId=${id}`);
+        return;
+      }
       setActionBanner({ type: 'ok', text: 'Claim sent to Coding queue.' });
       await fetchClaim();
     } catch (e) {
@@ -1283,8 +1296,16 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
                   </button>
                 </>
               )}
-              {isDenied && claim.status !== 'sent_to_coding' && (
-                <>
+              {['sent_to_coding', 'coding_review', 'coding_corrected'].includes(claim.status) ? (
+                <button
+                  onClick={() => router.push(`/coding?claimId=${id}`)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-50 text-indigo-700 text-xs font-medium hover:bg-indigo-100 transition-colors"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Open Coding Workbench
+                </button>
+              ) : (
+                !['paid', 'closed'].includes(claim.status) && (
                   <button
                     onClick={() => {
                       setCodingReason(claim.denialReason || '');
@@ -1295,15 +1316,17 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
                     <Send className="w-3.5 h-3.5" />
                     Send to Coding
                   </button>
-                  <button
-                    onClick={handleAnalyze}
-                    disabled={saving || analyzing}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-50 text-blue-700 text-xs font-medium hover:bg-blue-100 transition-colors disabled:opacity-50"
-                  >
-                    <Brain className="w-3.5 h-3.5" />
-                    AI Analyze
-                  </button>
-                </>
+                )
+              )}
+              {isDenied && (
+                <button
+                  onClick={handleAnalyze}
+                  disabled={saving || analyzing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-50 text-blue-700 text-xs font-medium hover:bg-blue-100 transition-colors disabled:opacity-50"
+                >
+                  <Brain className="w-3.5 h-3.5" />
+                  AI Analyze
+                </button>
               )}
             </div>
           )}
@@ -1551,25 +1574,44 @@ export default function ClaimDetailPage({ params }: { params: Promise<{ id: stri
       <Modal
         isOpen={showCoding}
         onClose={() => setShowCoding(false)}
-        title="Send to Coding Team"
+        title="Send to Coding Team &amp; ICD-10 / CPT Studio"
       >
         <div className="space-y-4">
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-            All existing documents will be auto-attached.
+          <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-900">
+            All attached claim documents will be linked automatically. You can review FY2027 ICD-10-CM specificity, Excludes1 conflicts, CPT/HCPCS modifiers, and NCCI edits directly inside the built-in ad-free Coding Workbench.
           </div>
           <Textarea
-            label="Denial Reason"
+            label="Denial / Coding Issue Reason"
             value={codingReason}
             onChange={(e) => setCodingReason(e.target.value)}
-            placeholder="Describe the coding issue..."
-            rows={3}
+            placeholder="e.g., CO-4 missing modifier -25, CO-16 truncated ICD-10 code, or NCCI bundling edit..."
+            rows={2}
           />
-          <div className="flex justify-end gap-2">
+          <Textarea
+            label="Instructions / Comments for Coder (Optional)"
+            value={codingComments}
+            onChange={(e) => setCodingComments(e.target.value)}
+            placeholder="Add chart findings, laterality notes, or payer policy details..."
+            rows={2}
+          />
+          <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={codingAssignSelf}
+              onChange={(e) => setCodingAssignSelf(e.target.checked)}
+              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            Assign to me so I can review/update codes right away
+          </label>
+          <div className="flex flex-wrap justify-end gap-2">
             <Button variant="secondary" onClick={() => setShowCoding(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSendToCoding} loading={saving}>
-              Send to Coding
+            <Button variant="outline" onClick={() => handleSendToCoding(false)} loading={saving}>
+              Send to Queue
+            </Button>
+            <Button onClick={() => handleSendToCoding(true)} loading={saving}>
+              Send &amp; Open Coding Studio
             </Button>
           </div>
         </div>

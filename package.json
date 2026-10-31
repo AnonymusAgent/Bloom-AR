@@ -12,6 +12,7 @@
     "bootstrap:admin": "node scripts/bootstrap-platform-admin.mjs"
   },
   "dependencies": {
+    "@lowlysre/icd-10-cm": "^3.1.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/nodemailer": "^8.0.1",
     "@types/uuid": "^10.0.0",

@@ -251,9 +251,14 @@ export async function POST(request: NextRequest) {
       accountNumber,
       patientName,
       cptCodes,
+      diagnosisCode,
+      location,
       provider,
       insurance,
       payer,
+      denialReason,
+      priority,
+      status: requestedStatus,
     } = body;
     const dateOfService = cleanDate(body.dateOfService);
     const practiceId = cleanUuid(body.practiceId);
@@ -281,6 +286,20 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const validInitialStatuses = new Set([
+      'new',
+      'assigned',
+      'in_progress',
+      'pending',
+      'denied',
+      'paid',
+      'closed',
+    ]);
+    const initialStatus: typeof claims.$inferSelect.status =
+      typeof requestedStatus === 'string' && validInitialStatuses.has(requestedStatus)
+        ? (requestedStatus as typeof claims.$inferSelect.status)
+        : 'new';
+
     const [newClaim] = await db
       .insert(claims)
       .values({
@@ -289,21 +308,25 @@ export async function POST(request: NextRequest) {
         patientName: patientName || null,
         dateOfService,
         cptCodes: cptCodes || null,
+        diagnosisCode: diagnosisCode ? String(diagnosisCode).slice(0, 100) : null,
+        location: location || null,
         provider: provider || null,
         insurance: insurance || null,
         payer: payer || null,
+        denialReason: denialReason || null,
+        priority: priority || 'normal',
         billedAmount,
         paidAmount,
         balance,
         practiceId,
-        status: 'new',
+        status: initialStatus,
         workflowStatus: 'unworked',
       })
       .returning();
 
     await db.insert(claimStatusHistory).values({
       claimId: newClaim.id,
-      newStatus: 'new',
+      newStatus: initialStatus,
       changedBy: user.id,
       reason: 'Claim created',
     });
