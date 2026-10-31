@@ -1,7 +1,7 @@
 import { MarketingShell, H1 } from '@/components/marketing/Marketing';
 import { getSiteContent } from '@/lib/site-content';
 export const dynamic = 'force-dynamic';
-export const metadata = { title: 'Accessibility — AR Manager', description: 'How AR Manager supports accessible use of our website and application, and how to request help.' };
+export const metadata = { title: 'Accessibility — BloomAR Manager', description: 'How BloomAR Manager supports accessible use of our website and application, and how to request help.' };
 export default async function Page() {
   const c = await getSiteContent();
   return <MarketingShell content={c}><section className="mx-auto max-w-3xl px-5 py-14">

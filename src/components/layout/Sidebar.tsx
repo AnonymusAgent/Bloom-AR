@@ -64,7 +64,7 @@ export function Sidebar({ user, collapsed, onToggle, onLogout }: SidebarProps) {
           {!collapsed && (
             <div className="flex items-center gap-2.5">
               <BrandMark size="sm" />
-              <span className="font-bold text-sm tracking-tight">AR Manager</span>
+              <span className="font-bold text-sm tracking-tight">BloomAR Manager</span>
             </div>
           )}
           <button onClick={onToggle} className="p-1.5 rounded-md hover:bg-white/10 transition-colors">

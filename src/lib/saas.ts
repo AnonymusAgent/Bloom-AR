@@ -3,13 +3,13 @@ import { db } from '@/db';
 import { plans, subscriptions, organizations, organizationDomains } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 
-export const RESERVED_SLUGS = new Set(['www','app','api','admin','login','register','pricing','features','about','contact','faq','dashboard','support','billing','mail','vercel','ar-manager']);
+export const RESERVED_SLUGS = new Set(['www','app','api','admin','login','register','pricing','features','about','contact','faq','dashboard','support','billing','mail','vercel','ar-manager','bloomar','bloomar-manager','bloom']);
 export function slugify(input: string) { return input.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,60); }
 export function validateSlug(slug: string) { return /^[a-z0-9]([a-z0-9-]{1,58}[a-z0-9])?$/.test(slug) && !RESERVED_SLUGS.has(slug); }
 export function makeToken() { return crypto.randomBytes(32).toString('hex'); }
 export function hashToken(t: string) { return crypto.createHash('sha256').update(t).digest('hex'); }
 export const appUrl = () => (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'http://localhost:3000').replace(/\/$/,'');
-export const rootDomain = () => process.env.NEXT_PUBLIC_ROOT_DOMAIN || ''; // e.g. ar-manager-ten.vercel.app
+export const rootDomain = () => process.env.NEXT_PUBLIC_ROOT_DOMAIN || ''; // e.g. bloomar-manager.vercel.app
 
 import { DEFAULT_PLAN_CATALOG } from './plans-shared';
 export { DEFAULT_PLAN_CATALOG as DEFAULT_PLANS } from './plans-shared';

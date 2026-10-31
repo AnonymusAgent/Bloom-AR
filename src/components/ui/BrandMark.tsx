@@ -7,11 +7,11 @@ interface BrandMarkProps {
 
 const px = { sm: 32, md: 48, lg: 64 };
 
-/** Official AR Manager logo mark (navy hexagon, pulse rising into an arrow). */
+/** Official BloomAR Manager logo mark (navy hexagon, pulse rising into an arrow). */
 export function BrandMark({ size = 'md' }: BrandMarkProps) {
   const s = px[size];
   return (
-    <Image src="/logo-mark.svg" alt="AR Manager logo" width={s} height={s} priority={size === 'lg'}
+    <Image src="/logo-mark.svg" alt="BloomAR Manager logo" width={s} height={s} priority={size === 'lg'}
       className="flex-none drop-shadow-sm" style={{ width: s, height: s }} />
   );
 }

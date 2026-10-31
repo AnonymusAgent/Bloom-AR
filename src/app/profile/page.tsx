@@ -515,7 +515,7 @@ function ProfileContent() {
               <Card>
                 <CardHeader
                   title="Personal Information"
-                  subtitle="Update your basic contact details and how you appear across AR Manager."
+                  subtitle="Update your basic contact details and how you appear across BloomAR Manager."
                 />
                 <form onSubmit={handleSavePersonalInfo} className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -654,7 +654,7 @@ function ProfileContent() {
             <Card>
               <CardHeader
                 title="Account Credentials & System Information"
-                subtitle="Detailed identity, identifiers, and role assignments in the AR Manager system."
+                subtitle="Detailed identity, identifiers, and role assignments in the BloomAR Manager system."
               />
               <div className="divide-y divide-[#E5E7EB]">
                 <div className="py-3.5 grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -1197,7 +1197,7 @@ function ProfileContent() {
                   </h3>
                 </div>
                 <p className="text-xs text-slate-500 mb-4">
-                  Actions you are explicitly permitted to perform within AR Manager.
+                  Actions you are explicitly permitted to perform within BloomAR Manager.
                 </p>
 
                 <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">

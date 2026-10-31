@@ -1,6 +1,6 @@
 # Application Audit Report
 
-## AR Manager — Medical Billing AR Management System
+## BloomAR Manager — Medical Billing AR Management System
 
 **Audit Date:** 2025-07-02
 **Auditor:** Full-Stack Senior Engineer
@@ -11,7 +11,7 @@
 
 ## 1. Executive Summary
 
-The AR Manager application is a comprehensive medical billing and AR management system built with Next.js 16, React 19, TypeScript, PostgreSQL (Neon), and Drizzle ORM. It contains **27 pages, 59 API routes, 33 database tables, and 924 lines of schema**.
+The BloomAR Manager application is a comprehensive medical billing and AR management system built with Next.js 16, React 19, TypeScript, PostgreSQL (Neon), and Drizzle ORM. It contains **27 pages, 59 API routes, 33 database tables, and 924 lines of schema**.
 
 **Overall Status: PRODUCTION READY WITH MINOR ISSUES**
 

@@ -5,7 +5,7 @@ import { DEFAULT_PLAN_CATALOG, type PlanCatalogItem } from '@/lib/plans-shared';
 import { db } from '@/db';
 import { plans as plansTable } from '@/db/schema';
 export const dynamic = 'force-dynamic';
-export const metadata = { title: 'Pricing — AR Manager', description: 'Starter, Professional and Enterprise plans for medical billing and AR management. Start a free trial, no card required.' };
+export const metadata = { title: 'Pricing — BloomAR Manager', description: 'Starter, Professional and Enterprise plans for medical billing and AR management. Start a free trial, no card required.' };
 
 async function loadPlans(): Promise<{ plans: PlanCatalogItem[]; source: 'live' | 'catalog' }> {
   try {

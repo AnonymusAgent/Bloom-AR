@@ -1,4 +1,4 @@
-# AR Manager — Medical Billing AR Management System
+# BloomAR Manager — Medical Billing AR Management System
 
 **Version 3.0.0** · Made with ❤️ by WebLoom
 
@@ -120,7 +120,7 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=your-email@example.com
 SMTP_PASS=your-password
-SMTP_FROM="AR Manager <noreply@example.com>"
+SMTP_FROM="BloomAR Manager <noreply@example.com>"
 ```
 
 ### First-Time Setup
