@@ -1236,7 +1236,11 @@ export async function runEnvTenantBootstrapIfNeeded(): Promise<void> {
   const raw = process.env.TENANT_BOOTSTRAP_CONFIG;
   if (!raw || !raw.trim()) return;
   try {
-    const parsed = JSON.parse(raw) as TenantBootstrapConfig;
+    const trimmed = raw.trim();
+    const jsonText = trimmed.startsWith('{')
+      ? trimmed
+      : Buffer.from(trimmed.replace(/^b64:/, ''), 'base64').toString('utf8');
+    const parsed = JSON.parse(jsonText) as TenantBootstrapConfig;
     await runTenantBootstrapFromConfig(parsed);
   } catch (err) {
     console.error('[tenant-bootstrap] Failed to apply TENANT_BOOTSTRAP_CONFIG:', err);
