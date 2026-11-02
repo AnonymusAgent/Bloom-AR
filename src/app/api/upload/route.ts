@@ -1,23 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { uploadedFiles, claims, practices, users } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser, canUploadFiles, canAssignClaims } from '@/lib/auth';
-import { canAccessPractice } from '@/lib/rbac';
+import { and, eq } from 'drizzle-orm';
+import { canUploadFiles, canAssignClaims } from '@/lib/auth';
+import { canAccessPractice, verifyUserInOrg } from '@/lib/rbac';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { parseWorkbookWithMapping } from '@/lib/file-parser';
 import { createNotification } from '@/lib/notifications';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import { requireTenantContext } from '@/lib/tenant-context';
+import { getEntitlements } from '@/lib/saas';
 
-const BATCH_SIZE = 100; // Safe batch size for PostgreSQL parameters
+const BATCH_SIZE = 100;
 
 export async function POST(request: NextRequest) {
   try {
     await ensureSaaSColumns();
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     if (!canUploadFiles(user.role)) {
       return NextResponse.json(
@@ -26,6 +28,17 @@ export async function POST(request: NextRequest) {
             'You do not have permission to upload AR files. Required role: Administrator, Supervisor, Manager, or Senior Lead.',
         },
         { status: 403 }
+      );
+    }
+
+    const ent = await getEntitlements(organizationId);
+    if (ent && !ent.canCreateClaim) {
+      return NextResponse.json(
+        {
+          error: `Monthly claim limit (${ent.usage.claimsLimit}) reached for your plan. Upgrade in Billing Settings.`,
+          code: 'CLAIM_LIMIT_REACHED',
+        },
+        { status: 402 }
       );
     }
 
@@ -43,7 +56,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No file provided for upload.' }, { status: 400 });
     }
 
-    // Require practice unless admin
     if (!practiceId && user.role !== 'administrator') {
       return NextResponse.json(
         { error: 'Practice selection is required for importing AR claims.' },
@@ -51,23 +63,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate practice exists and user has access if provided
     let selectedPracticeRecord: { id: string; name: string; code: string } | null = null;
     if (practiceId) {
       const [practice] = await db
         .select({ id: practices.id, name: practices.name, code: practices.code })
         .from(practices)
-        .where(eq(practices.id, practiceId))
+        .where(and(eq(practices.id, practiceId), eq(practices.organizationId, organizationId)))
         .limit(1);
 
       if (!practice) {
         return NextResponse.json(
-          { error: 'The selected practice could not be found.' },
+          { error: 'The selected practice could not be found in your organization.' },
           { status: 400 }
         );
       }
 
-      const hasAccess = await canAccessPractice(user, practiceId);
+      const hasAccess = await canAccessPractice(user, practiceId, organizationId);
       if (!hasAccess) {
         return NextResponse.json(
           { error: 'You do not have permission to import claims for this practice.' },
@@ -77,7 +88,6 @@ export async function POST(request: NextRequest) {
       selectedPracticeRecord = practice;
     }
 
-    // Validate assigned user if provided
     if (assignedTo) {
       if (!canAssignClaims(user.role)) {
         return NextResponse.json(
@@ -86,8 +96,16 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      const inOrg = await verifyUserInOrg(assignedTo, organizationId);
+      if (!inOrg) {
+        return NextResponse.json(
+          { error: 'The selected assignee does not belong to your organization.' },
+          { status: 400 }
+        );
+      }
+
       const [assignedUserRecord] = await db
-        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+        .select({ id: users.id })
         .from(users)
         .where(eq(users.id, assignedTo))
         .limit(1);
@@ -120,10 +138,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Create initial upload record in database
     const [uploadRecord] = await db
       .insert(uploadedFiles)
       .values({
+        organizationId,
         fileName,
         fileType,
         fileSize,
@@ -135,7 +153,6 @@ export async function POST(request: NextRequest) {
     try {
       const buffer = Buffer.from(await file.arrayBuffer());
 
-      // Parse with mappings
       let parseResult: ReturnType<typeof parseWorkbookWithMapping>;
       try {
         parseResult = parseWorkbookWithMapping(buffer, {
@@ -143,19 +160,17 @@ export async function POST(request: NextRequest) {
           headerRowIndex,
           columnMapping,
         });
-      } catch (parseError: any) {
+      } catch (parseError: unknown) {
+        const msg = parseError instanceof Error ? parseError.message : 'File parsing failed.';
         await db
           .update(uploadedFiles)
-          .set({
-            status: 'error',
-            errorMessage: parseError.message || 'File parsing failed.',
-          })
+          .set({ status: 'error', errorMessage: msg })
           .where(eq(uploadedFiles.id, uploadRecord.id));
 
         return NextResponse.json(
           {
             error:
-              parseError.message ||
+              msg ||
               'This Excel file could not be parsed. Please check that the file is not corrupted.',
           },
           { status: 400 }
@@ -185,8 +200,8 @@ export async function POST(request: NextRequest) {
       const initialStatus = assignedTo ? ('assigned' as const) : ('new' as const);
       const now = new Date();
 
-      // Prepare claim records for database insertion
       const claimsToInsert = records.map((data) => ({
+        organizationId,
         claimNumber: data.claimNumber!,
         accountNumber: data.accountNumber || null,
         patientName: data.patientName || null,
@@ -210,7 +225,6 @@ export async function POST(request: NextRequest) {
         additionalData: data.additionalData || null,
       }));
 
-      // Insert in chunks to guarantee safety with large files
       let insertedCount = 0;
       for (let i = 0; i < claimsToInsert.length; i += BATCH_SIZE) {
         const batch = claimsToInsert.slice(i, i + BATCH_SIZE);
@@ -218,7 +232,6 @@ export async function POST(request: NextRequest) {
         insertedCount += batch.length;
       }
 
-      // Update upload record as completed
       await db
         .update(uploadedFiles)
         .set({
@@ -228,12 +241,12 @@ export async function POST(request: NextRequest) {
         })
         .where(eq(uploadedFiles.id, uploadRecord.id));
 
-      // Notify assigned user if assigned
       if (assignedTo) {
         const practiceSuffix = selectedPracticeRecord
           ? ` for ${selectedPracticeRecord.code} — ${selectedPracticeRecord.name}`
           : '';
         await createNotification({
+          organizationId,
           userId: assignedTo,
           type: 'new_assignment',
           title: 'New AR Claims Assigned',
@@ -241,9 +254,10 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // Create audit log
       await createAuditLog({
+        organizationId,
         userId: user.id,
+        actorRole: ctx.orgRole,
         action: AUDIT_ACTIONS.FILE_UPLOADED,
         entityType: 'uploadedFile',
         entityId: uploadRecord.id,
@@ -270,30 +284,29 @@ export async function POST(request: NextRequest) {
         practice: selectedPracticeRecord,
         warnings,
       });
-    } catch (processingError: any) {
+    } catch (processingError: unknown) {
+      const msg =
+        processingError instanceof Error
+          ? processingError.message
+          : 'Upload processing failed.';
       console.error('Upload processing error:', processingError);
       await db
         .update(uploadedFiles)
-        .set({
-          status: 'error',
-          errorMessage: processingError.message || 'Upload processing failed.',
-        })
+        .set({ status: 'error', errorMessage: msg })
         .where(eq(uploadedFiles.id, uploadRecord.id));
 
       return NextResponse.json(
         {
           error:
-            processingError.message ||
+            msg ||
             'A database or server error occurred while inserting the claims. Please check your data formatting and try again.',
         },
         { status: 500 }
       );
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Failed to process file upload.';
     console.error('Fatal upload error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Failed to process file upload.' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

@@ -10,15 +10,17 @@ import {
   practices,
   users,
 } from '@/db/schema';
-import { eq, inArray } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
-import { canViewUser, getUserAuthorizedPracticeIds } from '@/lib/rbac';
+import { and, eq, inArray } from 'drizzle-orm';
+import { isSupervisorOrAbove } from '@/lib/auth';
+import type { User } from '@/db/schema';
+import { canViewUser, getUserAuthorizedPracticeIds, verifyUserInOrg } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
 import { cleanUuid } from '@/lib/sanitize';
 import { analyzeClaimCoding, splitDiagnosisInput } from '@/lib/coding/coding-checker';
 import { formatICD10Code } from '@/lib/coding/icd10-service';
 import { parseProcedureTokens } from '@/lib/coding/cpt-hcpcs-reference';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 const VALID_STATUSES = new Set([
   'sent_to_coding',
@@ -29,17 +31,20 @@ const VALID_STATUSES = new Set([
 ]);
 
 async function checkCodingRequestAccess(
-  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
+  user: User,
   codingReq: typeof codingRequests.$inferSelect,
-  claim: typeof claims.$inferSelect | undefined
+  claim: typeof claims.$inferSelect | undefined,
+  organizationId: string,
+  isReadOnly: boolean
 ): Promise<boolean> {
-  if (isSupervisorOrAbove(user.role)) return true;
+  if (codingReq.organizationId !== organizationId) return false;
+  if (isReadOnly || isSupervisorOrAbove(user.role)) return true;
   if (codingReq.sentBy === user.id || codingReq.assignedTo === user.id) return true;
   if (!claim) return false;
-  const authPractices = await getUserAuthorizedPracticeIds(user);
+  const authPractices = await getUserAuthorizedPracticeIds(user, organizationId);
   if (authPractices === 'all') return true;
   if (claim.practiceId && authPractices.includes(claim.practiceId)) return true;
-  if (claim.assignedTo && (await canViewUser(user, claim.assignedTo))) return true;
+  if (claim.assignedTo && (await canViewUser(user, claim.assignedTo, organizationId))) return true;
   return false;
 }
 
@@ -77,8 +82,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
     const { id: rawId } = await params;
     const id = cleanUuid(rawId);
     if (!id) return NextResponse.json({ error: 'Invalid coding request ID' }, { status: 400 });
@@ -86,24 +93,34 @@ export async function GET(
     const [existing] = await db
       .select()
       .from(codingRequests)
-      .where(eq(codingRequests.id, id))
+      .where(
+        and(eq(codingRequests.id, id), eq(codingRequests.organizationId, organizationId))
+      )
       .limit(1);
     if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
     const [claim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, existing.claimId))
+      .where(and(eq(claims.id, existing.claimId), eq(claims.organizationId, organizationId)))
       .limit(1);
 
-    if (!(await checkCodingRequestAccess(user, existing, claim))) {
+    if (!(await checkCodingRequestAccess(user, existing, claim, organizationId, ctx.isReadOnly))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
     const includeDocData = request.nextUrl.searchParams.get('includeDocData') === 'true';
 
     const docs = includeDocData
-      ? await db.select().from(codingDocuments).where(eq(codingDocuments.codingRequestId, id))
+      ? await db
+          .select()
+          .from(codingDocuments)
+          .where(
+            and(
+              eq(codingDocuments.codingRequestId, id),
+              eq(codingDocuments.organizationId, organizationId)
+            )
+          )
       : await db
           .select({
             id: codingDocuments.id,
@@ -113,13 +130,20 @@ export async function GET(
             createdAt: codingDocuments.createdAt,
           })
           .from(codingDocuments)
-          .where(eq(codingDocuments.codingRequestId, id));
+          .where(
+            and(
+              eq(codingDocuments.codingRequestId, id),
+              eq(codingDocuments.organizationId, organizationId)
+            )
+          );
 
     const practiceRow = claim?.practiceId
       ? await db
           .select({ id: practices.id, name: practices.name, code: practices.code })
           .from(practices)
-          .where(eq(practices.id, claim.practiceId))
+          .where(
+            and(eq(practices.id, claim.practiceId), eq(practices.organizationId, organizationId))
+          )
           .limit(1)
       : [];
 
@@ -184,8 +208,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
     const { id: rawId } = await params;
     const id = cleanUuid(rawId);
     if (!id) return NextResponse.json({ error: 'Invalid coding request ID' }, { status: 400 });
@@ -195,17 +221,19 @@ export async function PATCH(
     const [existing] = await db
       .select()
       .from(codingRequests)
-      .where(eq(codingRequests.id, id))
+      .where(
+        and(eq(codingRequests.id, id), eq(codingRequests.organizationId, organizationId))
+      )
       .limit(1);
     if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
     const [claim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, existing.claimId))
+      .where(and(eq(claims.id, existing.claimId), eq(claims.organizationId, organizationId)))
       .limit(1);
 
-    if (!(await checkCodingRequestAccess(user, existing, claim))) {
+    if (!(await checkCodingRequestAccess(user, existing, claim, organizationId, false))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
@@ -240,6 +268,12 @@ export async function PATCH(
         if (!cleanAssignee) {
           return NextResponse.json({ error: 'Invalid assignee ID' }, { status: 400 });
         }
+        if (!(await verifyUserInOrg(cleanAssignee, organizationId))) {
+          return NextResponse.json(
+            { error: 'Assignee not found in your organization' },
+            { status: 400 }
+          );
+        }
         updateData.assignedTo = cleanAssignee;
         if (cleanAssignee !== existing.assignedTo && cleanAssignee !== user.id) {
           newlyAssignedUserId = cleanAssignee;
@@ -250,7 +284,9 @@ export async function PATCH(
     const [updated] = await db
       .update(codingRequests)
       .set(updateData)
-      .where(eq(codingRequests.id, id))
+      .where(
+        and(eq(codingRequests.id, id), eq(codingRequests.organizationId, organizationId))
+      )
       .returning();
 
     const claimStatusMap: Record<string, string> = {
@@ -306,15 +342,20 @@ export async function PATCH(
         const [savedClaim] = await db
           .update(claims)
           .set(claimPatch)
-          .where(eq(claims.id, claim.id))
+          .where(and(eq(claims.id, claim.id), eq(claims.organizationId, organizationId)))
           .returning();
         updatedClaim = savedClaim;
 
-        if (body.status && claimStatusMap[body.status] && claimStatusMap[body.status] !== claim.status) {
+        if (
+          body.status &&
+          claimStatusMap[body.status] &&
+          claimStatusMap[body.status] !== claim.status
+        ) {
           const reasonParts = [`Coding: ${body.status}`];
           if (codeChangesSummary.length > 0) reasonParts.push(codeChangesSummary.join('; '));
           if (body.correctionNotes) reasonParts.push(String(body.correctionNotes));
           await db.insert(claimStatusHistory).values({
+            organizationId,
             claimId: claim.id,
             previousStatus: claim.status,
             newStatus: claimStatusMap[body.status] as typeof claim.status,
@@ -335,6 +376,7 @@ export async function PATCH(
 
           if (noteLines) {
             await db.insert(claimNotes).values({
+              organizationId,
               claimId: claim.id,
               userId: user.id,
               note: noteLines,
@@ -347,18 +389,21 @@ export async function PATCH(
 
       if (body.status && existing.sentBy && existing.sentBy !== user.id) {
         await createNotification({
+          organizationId,
           userId: existing.sentBy,
           type: 'system',
           title: 'Coding Review Updated',
-          message: `Claim ${claim.claimNumber} coding status: ${String(body.status).replace(/_/g, ' ')}${
-            codeChangesSummary.length > 0 ? ` (${codeChangesSummary.join('; ')})` : ''
-          }`,
+          message: `Claim ${claim.claimNumber} coding status: ${String(body.status).replace(
+            /_/g,
+            ' '
+          )}${codeChangesSummary.length > 0 ? ` (${codeChangesSummary.join('; ')})` : ''}`,
           relatedClaimId: existing.claimId,
         });
       }
 
       if (newlyAssignedUserId) {
         await createNotification({
+          organizationId,
           userId: newlyAssignedUserId,
           type: 'task_assigned',
           title: 'Coding Request Assigned',
@@ -369,7 +414,9 @@ export async function PATCH(
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'coding_request_updated',
       entityType: 'codingRequest',
       entityId: id,

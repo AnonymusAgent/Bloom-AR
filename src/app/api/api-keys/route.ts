@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { apiKeys, organizationMembers } from '@/db/schema';
-import { eq, desc, and, inArray, or } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { apiKeys } from '@/db/schema';
+import { eq, desc, and } from 'drizzle-orm';
+import { requireTenantContext } from '@/lib/tenant-context';
 import { createAuditLog } from '@/lib/audit';
 import { cleanUuid } from '@/lib/sanitize';
 import bcrypt from 'bcryptjs';
@@ -10,21 +10,11 @@ import { randomUUID } from 'crypto';
 
 export async function GET() {
   try {
-    const user = await getCurrentUser();
-    if (!user || user.role !== 'administrator') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
-    const memberships = await db
-      .select({ organizationId: organizationMembers.organizationId })
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, user.id));
-    const orgIds = memberships.map((m) => m.organizationId);
-
-    const scopeCond =
-      orgIds.length > 0
-        ? or(eq(apiKeys.createdBy, user.id), inArray(apiKeys.organizationId, orgIds))
-        : eq(apiKeys.createdBy, user.id);
+    const auth = await requireTenantContext({
+      requiredOrgRoles: ['owner', 'admin'],
+    });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const keys = await db
       .select({
@@ -39,7 +29,7 @@ export async function GET() {
         createdAt: apiKeys.createdAt,
       })
       .from(apiKeys)
-      .where(scopeCond)
+      .where(eq(apiKeys.organizationId, ctx.organizationId))
       .orderBy(desc(apiKeys.createdAt));
 
     return NextResponse.json({ apiKeys: keys });
@@ -51,31 +41,24 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || user.role !== 'administrator') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
+    const auth = await requireTenantContext({
+      allowMutation: true,
+      requiredOrgRoles: ['owner', 'admin'],
+      requiredPlanSlug: ['professional', 'enterprise'],
+    });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
-    const { name, permissions, expiresInDays, organizationId } = await request.json();
+    const { name, permissions, expiresInDays } = await request.json();
     if (!name) return NextResponse.json({ error: 'Name required' }, { status: 400 });
-
-    const memberships = await db
-      .select({ organizationId: organizationMembers.organizationId })
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, user.id));
-    const orgIds = memberships.map((m) => m.organizationId);
-
-    const requestedOrgId = cleanUuid(organizationId);
-    const resolvedOrgId =
-      requestedOrgId && orgIds.includes(requestedOrgId)
-        ? requestedOrgId
-        : orgIds[0] || null;
 
     const rawKey = `armgr_${randomUUID().replace(/-/g, '')}`;
     const keyPrefix = rawKey.substring(0, 8);
     const keyHash = await bcrypt.hash(rawKey, 10);
 
-    const expiresAt = expiresInDays ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000) : null;
+    const expiresAt = expiresInDays
+      ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000)
+      : null;
 
     const [apiKey] = await db
       .insert(apiKeys)
@@ -84,18 +67,20 @@ export async function POST(request: NextRequest) {
         keyHash,
         keyPrefix,
         permissions: permissions || ['read'],
-        organizationId: resolvedOrgId,
-        createdBy: user.id,
+        organizationId: ctx.organizationId,
+        createdBy: ctx.user.id,
         expiresAt,
       })
       .returning();
 
     await createAuditLog({
-      userId: user.id,
+      organizationId: ctx.organizationId,
+      userId: ctx.user.id,
+      actorRole: ctx.orgRole,
       action: 'api_key_created',
       entityType: 'apiKey',
       entityId: apiKey.id,
-      newValue: { name, keyPrefix, organizationId: resolvedOrgId },
+      newValue: { name, keyPrefix, organizationId: ctx.organizationId },
     });
 
     return NextResponse.json({
@@ -110,25 +95,31 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || user.role !== 'administrator') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
+    const auth = await requireTenantContext({
+      allowMutation: true,
+      requiredOrgRoles: ['owner', 'admin'],
+    });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const body = await request.json().catch(() => ({} as Record<string, string>));
     const keyId = cleanUuid(request.nextUrl.searchParams.get('id') || body.id);
     if (!keyId) return NextResponse.json({ error: 'Valid API key ID required' }, { status: 400 });
 
-    const [existing] = await db
-      .select()
-      .from(apiKeys)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.createdBy, user.id)))
-      .limit(1);
-    if (!existing) return NextResponse.json({ error: 'API key not found' }, { status: 404 });
+    const [deleted] = await db
+      .update(apiKeys)
+      .set({ isActive: false })
+      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.organizationId, ctx.organizationId)))
+      .returning();
 
-    await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, keyId));
+    if (!deleted) {
+      return NextResponse.json({ error: 'API key not found in your organization' }, { status: 404 });
+    }
+
     await createAuditLog({
-      userId: user.id,
+      organizationId: ctx.organizationId,
+      userId: ctx.user.id,
+      actorRole: ctx.orgRole,
       action: 'api_key_revoked',
       entityType: 'apiKey',
       entityId: keyId,

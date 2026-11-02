@@ -157,6 +157,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
 // Uploaded files table
 export const uploadedFiles = pgTable('uploaded_files', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   fileName: varchar('file_name', { length: 500 }).notNull(),
   fileType: varchar('file_type', { length: 50 }).notNull(),
   fileSize: integer('file_size').notNull(),
@@ -251,6 +252,7 @@ export const claimsRelations = relations(claims, ({ one, many }) => ({
 // Claim notes table
 export const claimNotes = pgTable('claim_notes', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id),
   note: text('note').notNull(),
@@ -272,6 +274,7 @@ export const claimNotesRelations = relations(claimNotes, ({ one }) => ({
 // Claim documents (EOB, denial letters, etc.)
 export const claimDocuments = pgTable('claim_documents', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id, { onDelete: 'cascade' }),
   documentType: varchar('document_type', { length: 50 }).notNull(),
   fileName: varchar('file_name', { length: 500 }).notNull(),
@@ -295,6 +298,7 @@ export const claimDocumentsRelations = relations(claimDocuments, ({ one }) => ({
 // Claim status history
 export const claimStatusHistory = pgTable('claim_status_history', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id, { onDelete: 'cascade' }),
   previousStatus: claimStatusEnum('previous_status'),
   newStatus: claimStatusEnum('new_status').notNull(),
@@ -314,10 +318,11 @@ export const claimStatusHistoryRelations = relations(claimStatusHistory, ({ one 
   }),
 }));
 
-// Denial codes (CARC and RARC codes)
+// Denial codes (CARC and RARC codes; organizationId NULL = global standard catalog, non-null = org custom)
 export const denialCodes = pgTable('denial_codes', {
   id: serial('id').primaryKey(),
-  code: varchar('code', { length: 20 }).notNull().unique(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
+  code: varchar('code', { length: 20 }).notNull(),
   codeType: varchar('code_type', { length: 10 }).notNull(),
   description: text('description').notNull(),
   category: varchar('category', { length: 100 }),
@@ -328,7 +333,9 @@ export const denialCodes = pgTable('denial_codes', {
 // Audit logs
 export const auditLogs = pgTable('audit_logs', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'set null' }),
   userId: uuid('user_id').references(() => users.id),
+  actorRole: varchar('actor_role', { length: 50 }),
   action: varchar('action', { length: 100 }).notNull(),
   entityType: varchar('entity_type', { length: 50 }).notNull(),
   entityId: varchar('entity_id', { length: 100 }),
@@ -349,6 +356,7 @@ export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
 // Notifications
 export const notifications = pgTable('notifications', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   type: notificationTypeEnum('type').notNull(),
   title: varchar('title', { length: 255 }).notNull(),
@@ -373,7 +381,12 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 export const sessions = pgTable('sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  activeOrganizationId: uuid('active_organization_id').references(() => organizations.id, { onDelete: 'set null' }),
   token: text('token').notNull().unique(),
+  lastActiveAt: timestamp('last_active_at').notNull().defaultNow(),
+  ipAddress: varchar('ip_address', { length: 64 }),
+  userAgent: text('user_agent'),
+  mfaVerifiedAt: timestamp('mfa_verified_at'),
   expiresAt: timestamp('expires_at').notNull(),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
@@ -385,12 +398,12 @@ export const sessionsRelations = relations(sessions, ({ one }) => ({
   }),
 }));
 
-// Practices table
+// Practices table (code is unique per organization via practices_org_code_uidx)
 export const practices = pgTable('practices', {
   id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').references(() => organizations.id),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   name: varchar('name', { length: 255 }).notNull(),
-  code: varchar('code', { length: 50 }).notNull().unique(),
+  code: varchar('code', { length: 50 }).notNull(),
   address: text('address'),
   phone: varchar('phone', { length: 50 }),
   email: varchar('email', { length: 255 }),
@@ -411,6 +424,7 @@ export const practicesRelations = relations(practices, ({ many }) => ({
 // User Practice Assignments
 export const userPracticeAssignments = pgTable('user_practice_assignments', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   practiceId: uuid('practice_id').notNull().references(() => practices.id, { onDelete: 'cascade' }),
   assignedBy: uuid('assigned_by').notNull().references(() => users.id),
@@ -440,6 +454,7 @@ export const userPracticeAssignmentsRelations = relations(userPracticeAssignment
 // User Responsibilities
 export const userResponsibilities = pgTable('user_responsibilities', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   responsibility: responsibilityEnum('responsibility').notNull(),
   assignedBy: uuid('assigned_by').notNull().references(() => users.id),
@@ -461,6 +476,7 @@ export const userResponsibilitiesRelations = relations(userResponsibilities, ({ 
 // Billing Tasks
 export const billingTasks = pgTable('billing_tasks', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
   category: taskCategoryEnum('category').notNull(),
@@ -520,6 +536,7 @@ export const billingTasksRelations = relations(billingTasks, ({ one, many }) => 
 // Task Documents
 export const taskDocuments = pgTable('task_documents', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   taskId: uuid('task_id').notNull().references(() => billingTasks.id, { onDelete: 'cascade' }),
   documentType: varchar('document_type', { length: 50 }).notNull(),
   fileName: varchar('file_name', { length: 500 }).notNull(),
@@ -553,6 +570,7 @@ export const taskDocumentsRelations = relations(taskDocuments, ({ one }) => ({
 // Task Notes
 export const taskNotes = pgTable('task_notes', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   taskId: uuid('task_id').notNull().references(() => billingTasks.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id),
   note: text('note').notNull(),
@@ -574,6 +592,7 @@ export const taskNotesRelations = relations(taskNotes, ({ one }) => ({
 // Sign-offs
 export const signoffs = pgTable('signoffs', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   entityType: varchar('entity_type', { length: 50 }).notNull(),
   entityId: uuid('entity_id').notNull(),
   taskId: uuid('task_id').references(() => billingTasks.id, { onDelete: 'cascade' }),
@@ -612,6 +631,7 @@ export const signoffsRelations = relations(signoffs, ({ one }) => ({
 // Task Status History
 export const taskStatusHistory = pgTable('task_status_history', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   taskId: uuid('task_id').notNull().references(() => billingTasks.id, { onDelete: 'cascade' }),
   previousStatus: taskStatusEnum('previous_status'),
   newStatus: taskStatusEnum('new_status').notNull(),
@@ -634,6 +654,7 @@ export const taskStatusHistoryRelations = relations(taskStatusHistory, ({ one })
 // ==================== AUTHORIZATION REFERRALS ====================
 export const authorizations = pgTable('authorizations', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   patientName: varchar('patient_name', { length: 255 }).notNull(),
   insuranceName: varchar('insurance_name', { length: 255 }).notNull(),
   authNumber: varchar('auth_number', { length: 100 }),
@@ -664,6 +685,7 @@ export const authorizationsRelations = relations(authorizations, ({ one, many })
 
 export const authDocuments = pgTable('auth_documents', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   authId: uuid('auth_id').notNull().references(() => authorizations.id, { onDelete: 'cascade' }),
   fileName: varchar('file_name', { length: 500 }).notNull(),
   fileData: text('file_data').notNull(),
@@ -681,6 +703,7 @@ export const authDocumentsRelations = relations(authDocuments, ({ one }) => ({
 // ==================== CODING REQUESTS ====================
 export const codingRequests = pgTable('coding_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id, { onDelete: 'cascade' }),
   status: codingStatusEnum('status').notNull().default('sent_to_coding'),
   denialReason: text('denial_reason'),
@@ -702,6 +725,7 @@ export const codingRequestsRelations = relations(codingRequests, ({ one, many })
 
 export const codingDocuments = pgTable('coding_documents', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   codingRequestId: uuid('coding_request_id').notNull().references(() => codingRequests.id, { onDelete: 'cascade' }),
   documentType: varchar('document_type', { length: 50 }).notNull(),
   fileName: varchar('file_name', { length: 500 }).notNull(),
@@ -718,6 +742,7 @@ export const codingDocumentsRelations = relations(codingDocuments, ({ one }) => 
 // ==================== CHAT MESSAGES ====================
 export const chatChannels = pgTable('chat_channels', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   name: varchar('name', { length: 255 }),
   channelType: varchar('channel_type', { length: 20 }).notNull().default('direct'),
   department: varchar('department', { length: 100 }),
@@ -733,6 +758,7 @@ export const chatChannelsRelations = relations(chatChannels, ({ one, many }) => 
 
 export const chatMembers = pgTable('chat_members', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   channelId: uuid('channel_id').notNull().references(() => chatChannels.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   lastReadAt: timestamp('last_read_at'),
@@ -746,6 +772,7 @@ export const chatMembersRelations = relations(chatMembers, ({ one }) => ({
 
 export const chatMessages = pgTable('chat_messages', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   channelId: uuid('channel_id').notNull().references(() => chatChannels.id, { onDelete: 'cascade' }),
   senderId: uuid('sender_id').notNull().references(() => users.id),
   content: text('content').notNull(),
@@ -767,6 +794,7 @@ export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
 // ==================== E-SIGNATURES ====================
 export const eSignatures = pgTable('e_signatures', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   documentType: varchar('document_type', { length: 100 }).notNull(),
   documentTitle: varchar('document_title', { length: 500 }).notNull(),
   documentContent: text('document_content'),
@@ -787,6 +815,7 @@ export const eSignatures = pgTable('e_signatures', {
 // ==================== OCR SCANS ====================
 export const ocrScans = pgTable('ocr_scans', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   fileName: varchar('file_name', { length: 500 }).notNull(),
   fileData: text('file_data').notNull(),
   mimeType: varchar('mime_type', { length: 100 }).notNull(),
@@ -805,6 +834,7 @@ export const ocrScans = pgTable('ocr_scans', {
 // ==================== AI DENIAL ANALYSIS ====================
 export const denialAnalyses = pgTable('denial_analyses', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id, { onDelete: 'cascade' }),
   denialCodeId: integer('denial_code_id').references(() => denialCodes.id),
   denialCode: varchar('denial_code', { length: 20 }),
@@ -854,7 +884,22 @@ export const organizationMembers = pgTable('organization_members', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   orgRole: varchar('org_role', { length: 50 }).notNull().default('member'),
+  operationalRole: userRoleEnum('operational_role').notNull().default('ar_executive'),
+  teamLeadId: uuid('team_lead_id').references(() => users.id, { onDelete: 'set null' }),
+  isActive: boolean('is_active').notNull().default(true),
+  invitedBy: uuid('invited_by').references(() => users.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
+// ==================== USER MFA ====================
+export const userMfa = pgTable('user_mfa', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  totpSecret: text('totp_secret').notNull(),
+  backupCodeHashes: jsonb('backup_code_hashes').notNull().default([]),
+  isEnabled: boolean('is_enabled').notNull().default(false),
+  enabledAt: timestamp('enabled_at'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
 // ==================== API KEYS ====================
@@ -875,7 +920,7 @@ export const apiKeys = pgTable('api_keys', {
 // ==================== PATIENTS ====================
 export const patients = pgTable('patients', {
   id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').references(() => organizations.id),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   firstName: varchar('first_name', { length: 100 }).notNull(),
   middleName: varchar('middle_name', { length: 100 }),
   lastName: varchar('last_name', { length: 100 }).notNull(),
@@ -899,6 +944,7 @@ export const patients = pgTable('patients', {
 // ==================== PAYMENTS ====================
 export const payments = pgTable('payments', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   paymentType: varchar('payment_type', { length: 50 }).notNull(),
   payerName: varchar('payer_name', { length: 255 }),
   paymentDate: date('payment_date').notNull(),
@@ -916,6 +962,7 @@ export const payments = pgTable('payments', {
 
 export const paymentAllocations = pgTable('payment_allocations', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   paymentId: uuid('payment_id').notNull().references(() => payments.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').notNull().references(() => claims.id),
   insurancePayment: decimal('insurance_payment', { precision: 12, scale: 2 }).default('0'),
@@ -933,8 +980,9 @@ export const paymentAllocations = pgTable('payment_allocations', {
 // ==================== ERA/835 FILES ====================
 export const eraFiles = pgTable('era_files', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   fileName: varchar('file_name', { length: 500 }).notNull(),
-  fileHash: varchar('file_hash', { length: 64 }).notNull().unique(),
+  fileHash: varchar('file_hash', { length: 64 }).notNull(),
   fileData: text('file_data').notNull(),
   payerName: varchar('payer_name', { length: 255 }),
   paymentDate: date('payment_date'),
@@ -952,6 +1000,7 @@ export const eraFiles = pgTable('era_files', {
 
 export const eraTransactions = pgTable('era_transactions', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
   eraFileId: uuid('era_file_id').notNull().references(() => eraFiles.id, { onDelete: 'cascade' }),
   claimId: uuid('claim_id').references(() => claims.id),
   claimNumber: varchar('claim_number', { length: 100 }),
@@ -1025,11 +1074,33 @@ export const subscriptions = pgTable('subscriptions', {
   externalSubscriptionId: varchar('external_subscription_id', { length: 255 }),
   status: varchar('status', { length: 30 }).notNull().default('trialing'),
   billingInterval: varchar('billing_interval', { length: 10 }).notNull().default('monthly'),
+  trialStart: timestamp('trial_start'),
   trialEnd: timestamp('trial_end'),
+  currentPeriodStart: timestamp('current_period_start'),
   currentPeriodEnd: timestamp('current_period_end'),
+  gracePeriodEndsAt: timestamp('grace_period_ends_at'),
+  pastDueSince: timestamp('past_due_since'),
+  cancelledAt: timestamp('cancelled_at'),
   cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+export const billingInvoices = pgTable('billing_invoices', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  subscriptionId: uuid('subscription_id').references(() => subscriptions.id, { onDelete: 'set null' }),
+  externalInvoiceId: varchar('external_invoice_id', { length: 255 }),
+  amountCents: integer('amount_cents').notNull().default(0),
+  currency: varchar('currency', { length: 3 }).notNull().default('USD'),
+  status: varchar('status', { length: 30 }).notNull().default('paid'),
+  billingReason: varchar('billing_reason', { length: 50 }),
+  invoicePdfUrl: text('invoice_pdf_url'),
+  hostedInvoiceUrl: text('hosted_invoice_url'),
+  periodStart: timestamp('period_start'),
+  periodEnd: timestamp('period_end'),
+  paidAt: timestamp('paid_at'),
+  failedAt: timestamp('failed_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 export const organizationDomains = pgTable('organization_domains', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -1050,6 +1121,7 @@ export const organizationInvitations = pgTable('organization_invitations', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   email: varchar('email', { length: 255 }).notNull(),
   orgRole: varchar('org_role', { length: 50 }).notNull().default('member'),
+  operationalRole: userRoleEnum('operational_role').notNull().default('ar_executive'),
   tokenHash: text('token_hash').notNull(),
   expiresAt: timestamp('expires_at').notNull(),
   acceptedAt: timestamp('accepted_at'),
@@ -1129,4 +1201,7 @@ export type ESignature = typeof eSignatures.$inferSelect;
 export type OcrScan = typeof ocrScans.$inferSelect;
 export type DenialAnalysis = typeof denialAnalyses.$inferSelect;
 export type Organization = typeof organizations.$inferSelect;
+export type OrganizationMember = typeof organizationMembers.$inferSelect;
+export type BillingInvoice = typeof billingInvoices.$inferSelect;
+export type UserMfa = typeof userMfa.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;

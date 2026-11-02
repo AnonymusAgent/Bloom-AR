@@ -1,89 +1,78 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, users } from '@/db/schema';
+import { claims, users, organizationMembers } from '@/db/schema';
 import { eq, sql, and, gte, inArray } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET() {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
-    // Build condition based on user role
-    let userCondition;
+    const baseOrgCond = eq(claims.organizationId, organizationId);
+    let scopeCond = baseOrgCond;
 
-    if (user.role === 'ar_executive' || user.role === 'billing_user') {
-      userCondition = eq(claims.assignedTo, user.id);
+    if (ctx.isReadOnly) {
+      // Read-only workspace observers/auditors see aggregate KPIs of their active organization
+      scopeCond = baseOrgCond;
+    } else if (user.role === 'ar_executive' || user.role === 'billing_user') {
+      scopeCond = and(baseOrgCond, eq(claims.assignedTo, user.id))!;
     } else if (user.role === 'team_lead' || user.role === 'senior_lead') {
       const teamMembers = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.teamLeadId, user.id));
-
-      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.id)];
-      userCondition = inArray(claims.assignedTo, teamMemberIds);
+        .select({ userId: organizationMembers.userId })
+        .from(organizationMembers)
+        .where(
+          and(
+            eq(organizationMembers.organizationId, organizationId),
+            eq(organizationMembers.teamLeadId, user.id),
+            eq(organizationMembers.isActive, true)
+          )
+        );
+      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.userId)];
+      scopeCond = and(baseOrgCond, inArray(claims.assignedTo, teamMemberIds))!;
     }
-    // For manager, supervisor, administrator - no condition (see all)
 
-    // Get claims by status
     const statusCounts = await db
       .select({
         status: claims.status,
         count: sql<number>`count(*)::int`,
       })
       .from(claims)
-      .where(userCondition)
+      .where(scopeCond)
       .groupBy(claims.status);
 
     const statusMap: Record<string, number> = {};
-    statusCounts.forEach(sc => {
+    statusCounts.forEach((sc) => {
       statusMap[sc.status] = sc.count;
     });
 
-    // Get total billed amount
     const [billedTotal] = await db
-      .select({
-        total: sql<string>`COALESCE(SUM(billed_amount::numeric), 0)::text`,
-      })
+      .select({ total: sql<string>`COALESCE(SUM(billed_amount::numeric), 0)::text` })
       .from(claims)
-      .where(userCondition);
+      .where(scopeCond);
 
-    // Get total paid amount
     const [paidTotal] = await db
-      .select({
-        total: sql<string>`COALESCE(SUM(paid_amount::numeric), 0)::text`,
-      })
+      .select({ total: sql<string>`COALESCE(SUM(paid_amount::numeric), 0)::text` })
       .from(claims)
-      .where(userCondition);
+      .where(scopeCond);
 
-    // Get total balance
     const [balanceTotal] = await db
-      .select({
-        total: sql<string>`COALESCE(SUM(balance::numeric), 0)::text`,
-      })
+      .select({ total: sql<string>`COALESCE(SUM(balance::numeric), 0)::text` })
       .from(claims)
-      .where(userCondition);
+      .where(scopeCond);
 
-    // Get today's activity
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const todayConditions = userCondition 
-      ? and(userCondition, gte(claims.updatedAt, today))
-      : gte(claims.updatedAt, today);
-
     const [todayActivity] = await db
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
+      .select({ count: sql<number>`count(*)::int` })
       .from(claims)
-      .where(todayConditions);
+      .where(and(scopeCond, gte(claims.updatedAt, today)));
 
-    // Get claims by assignee (for managers/leads)
-    let claimsByAssignee: Array<{ userId: string; userName: string; count: number }> = [];
-    
+    const claimsByAssignee: Array<{ userId: string; userName: string; count: number }> = [];
+
     if (['administrator', 'supervisor', 'manager', 'senior_lead', 'team_lead'].includes(user.role)) {
       const assigneeStats = await db
         .select({
@@ -91,17 +80,23 @@ export async function GET() {
           count: sql<number>`count(*)::int`,
         })
         .from(claims)
-        .where(userCondition)
+        .where(scopeCond)
         .groupBy(claims.assignedTo);
 
       for (const stat of assigneeStats) {
         if (stat.assignedTo) {
           const [assignee] = await db
             .select({ firstName: users.firstName, lastName: users.lastName })
-            .from(users)
-            .where(eq(users.id, stat.assignedTo))
+            .from(organizationMembers)
+            .innerJoin(users, eq(organizationMembers.userId, users.id))
+            .where(
+              and(
+                eq(organizationMembers.organizationId, organizationId),
+                eq(organizationMembers.userId, stat.assignedTo)
+              )
+            )
             .limit(1);
-          
+
           if (assignee) {
             claimsByAssignee.push({
               userId: stat.assignedTo,
@@ -113,17 +108,10 @@ export async function GET() {
       }
     }
 
-    // Get pending reviews count
     const [pendingReviews] = await db
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
+      .select({ count: sql<number>`count(*)::int` })
       .from(claims)
-      .where(
-        userCondition 
-          ? and(userCondition, eq(claims.status, 'submitted_for_review'))
-          : eq(claims.status, 'submitted_for_review')
-      );
+      .where(and(scopeCond, eq(claims.status, 'submitted_for_review')));
 
     return NextResponse.json({
       summary: {
@@ -149,12 +137,14 @@ export async function GET() {
         pendingReviews: pendingReviews.count,
       },
       claimsByAssignee,
+      organization: {
+        id: ctx.organizationId,
+        name: ctx.organization.name,
+        slug: ctx.organization.slug,
+      },
     });
   } catch (error) {
     console.error('Dashboard error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch dashboard data' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch dashboard data' }, { status: 500 });
   }
 }

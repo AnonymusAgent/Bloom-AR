@@ -360,7 +360,7 @@ export default function UsersPage() {
           </div>
 
           <Input label="Email Address *" type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })}
-            required={!editingUser} disabled={!!editingUser} placeholder="user@medicalbilling.com"
+            required={!editingUser} disabled={!!editingUser} placeholder="teammate@organization.com"
             helperText={editingUser ? 'Email cannot be changed after creation.' : undefined} />
 
           {!editingUser && (

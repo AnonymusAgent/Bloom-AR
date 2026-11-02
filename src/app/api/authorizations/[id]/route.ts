@@ -1,31 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { authorizations, authDocuments, users } from '@/db/schema';
-import { eq, desc } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
-import { canViewUser } from '@/lib/rbac';
+import { and, eq, desc } from 'drizzle-orm';
+import type { User } from '@/db/schema';
+import { canViewUser, verifyUserInOrg } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { cleanDate, cleanUuid } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 async function canAccessAuth(
-  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
-  auth: typeof authorizations.$inferSelect
+  user: User,
+  authRow: typeof authorizations.$inferSelect,
+  organizationId: string,
+  isReadOnly: boolean
 ): Promise<boolean> {
-  if (['administrator', 'supervisor', 'manager'].includes(user.role)) return true;
-  if (auth.assignedBy === user.id) return true;
-  if (!auth.assignedTo) return false;
-  return canViewUser(user, auth.assignedTo);
+  if (authRow.organizationId !== organizationId) return false;
+  if (isReadOnly || ['administrator', 'supervisor', 'manager'].includes(user.role)) return true;
+  if (authRow.assignedBy === user.id) return true;
+  if (!authRow.assignedTo) return false;
+  return canViewUser(user, authRow.assignedTo, organizationId);
 }
 
-export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const authRes = await requireTenantContext();
+    if (!authRes.ok) return authRes.response;
+    const { ctx } = authRes;
+    const { user, organizationId } = ctx;
     const { id } = await params;
 
-    const [auth] = await db.select().from(authorizations).where(eq(authorizations.id, id)).limit(1);
+    const [auth] = await db
+      .select()
+      .from(authorizations)
+      .where(and(eq(authorizations.id, id), eq(authorizations.organizationId, organizationId)))
+      .limit(1);
     if (!auth) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-    if (!(await canAccessAuth(user, auth))) {
+    if (!(await canAccessAuth(user, auth, organizationId, ctx.isReadOnly))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
@@ -48,7 +61,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
         createdAt: authDocuments.createdAt,
       })
       .from(authDocuments)
-      .where(eq(authDocuments.authId, id))
+      .where(and(eq(authDocuments.authId, id), eq(authDocuments.organizationId, organizationId)))
       .orderBy(desc(authDocuments.createdAt));
 
     return NextResponse.json({ authorization: { ...auth, assignee }, documents: docs });
@@ -58,16 +71,25 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const authRes = await requireTenantContext({ allowMutation: true });
+    if (!authRes.ok) return authRes.response;
+    const { ctx } = authRes;
+    const { user, organizationId } = ctx;
     const { id } = await params;
     const body = await request.json();
 
-    const [existing] = await db.select().from(authorizations).where(eq(authorizations.id, id)).limit(1);
+    const [existing] = await db
+      .select()
+      .from(authorizations)
+      .where(and(eq(authorizations.id, id), eq(authorizations.organizationId, organizationId)))
+      .limit(1);
     if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-    if (!(await canAccessAuth(user, existing))) {
+    if (!(await canAccessAuth(user, existing, organizationId, false))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
@@ -79,13 +101,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         updateData.completedBy = user.id;
         if (body.authNumber) updateData.authNumber = String(body.authNumber).trim();
         if (body.dateObtained !== undefined) {
-          updateData.dateObtained = cleanDate(body.dateObtained) || new Date().toISOString().split('T')[0];
+          updateData.dateObtained =
+            cleanDate(body.dateObtained) || new Date().toISOString().split('T')[0];
         }
       }
     }
     if (body.patientName !== undefined) updateData.patientName = String(body.patientName).trim();
-    if (body.insuranceName !== undefined) updateData.insuranceName = String(body.insuranceName).trim();
-    if (body.authNumber !== undefined) updateData.authNumber = body.authNumber ? String(body.authNumber).trim() : null;
+    if (body.insuranceName !== undefined) {
+      updateData.insuranceName = String(body.insuranceName).trim();
+    }
+    if (body.authNumber !== undefined) {
+      updateData.authNumber = body.authNumber ? String(body.authNumber).trim() : null;
+    }
     if (body.notes !== undefined) updateData.notes = body.notes ? String(body.notes) : null;
     if (body.dateObtained !== undefined && body.status !== 'completed') {
       updateData.dateObtained = cleanDate(body.dateObtained);
@@ -93,20 +120,32 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (body.expirationDate !== undefined) {
       updateData.expirationDate = cleanDate(body.expirationDate);
     }
-    if (body.assignedTo !== undefined && ['administrator', 'supervisor', 'manager', 'senior_lead', 'team_lead'].includes(user.role)) {
-      updateData.assignedTo = cleanUuid(body.assignedTo);
+    if (
+      body.assignedTo !== undefined &&
+      ['administrator', 'supervisor', 'manager', 'senior_lead', 'team_lead'].includes(user.role)
+    ) {
+      const nextAssignee = cleanUuid(body.assignedTo);
+      if (nextAssignee && !(await verifyUserInOrg(nextAssignee, organizationId))) {
+        return NextResponse.json(
+          { error: 'Assignee not found in your organization' },
+          { status: 400 }
+        );
+      }
+      updateData.assignedTo = nextAssignee;
       updateData.assignedBy = user.id;
-      updateData.assignedAt = updateData.assignedTo ? new Date() : null;
+      updateData.assignedAt = nextAssignee ? new Date() : null;
     }
 
     const [updated] = await db
       .update(authorizations)
       .set(updateData)
-      .where(eq(authorizations.id, id))
+      .where(and(eq(authorizations.id, id), eq(authorizations.organizationId, organizationId)))
       .returning();
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'authorization_updated',
       entityType: 'authorization',
       entityId: id,

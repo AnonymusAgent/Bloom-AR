@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth';
 import {
   getICD10Chapters,
   getICD10Detail,
@@ -14,13 +13,12 @@ import {
   PROCEDURE_REFERENCE,
   searchProceduresAndModifiers,
 } from '@/lib/coding/cpt-hcpcs-reference';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
 
     const sp = request.nextUrl.searchParams;
     const mode = sp.get('mode') || 'search';
@@ -62,9 +60,13 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ modifier: getModifierInfo(code) });
     }
 
-    // Default: unified search across ICD-10-CM, CPT, HCPCS, and Modifiers
     const q = sp.get('q') || '';
-    const scope = (sp.get('scope') || 'all') as 'all' | 'icd10' | 'cpt' | 'hcpcs' | 'modifiers';
+    const scope = (sp.get('scope') || 'all') as
+      | 'all'
+      | 'icd10'
+      | 'cpt'
+      | 'hcpcs'
+      | 'modifiers';
     const billableOnly = sp.get('billableOnly') === 'true';
     const chapter = sp.get('chapter') || undefined;
     const limit = Math.min(80, Math.max(5, parseInt(sp.get('limit') || '35', 10) || 35));
@@ -77,10 +79,7 @@ export async function GET(request: NextRequest) {
     const procModResults =
       scope === 'icd10'
         ? { procedures: [], modifiers: [] }
-        : searchProceduresAndModifiers(
-            q,
-            scope === 'all' ? 'all' : scope
-          );
+        : searchProceduresAndModifiers(q, scope === 'all' ? 'all' : scope);
 
     return NextResponse.json({
       query: q,

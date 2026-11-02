@@ -245,16 +245,6 @@ function ClaimsPageContent() {
             {isSuper && selectedClaims.length > 0 && (
               <Button size="sm" onClick={() => setShowAssign(true)}><UserPlus className="w-3.5 h-3.5 mr-1" />Assign ({selectedClaims.length})</Button>
             )}
-            {currentUser?.role === 'administrator' && (
-              <Button size="sm" variant="secondary" onClick={async () => {
-                if (!confirm('Replace ALL current claims with 50 synthetic test claims (TEST-CLM-001…050)? This permanently deletes the existing claim data.')) return;
-                if (!confirm('Are you sure? This cannot be undone.')) return;
-                const res = await fetch('/api/claims/test-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ confirm: 'REPLACE_ALL_CLAIMS' }) });
-                const d = await res.json().catch(() => ({}));
-                alert(res.ok ? d.message : (d.error || 'Failed to load test claims'));
-                if (res.ok) { setPage(1); fetchClaims(); fetchCounts(); }
-              }}>Load 50 test claims</Button>
-            )}
           </div>
         </div>
 

@@ -1,23 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { chatMessages, chatMembers } from '@/db/schema';
+import { chatChannels, chatMessages, chatMembers } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { user, organizationId } = auth.ctx;
 
     const { id } = await params;
 
     const [message] = await db
       .select()
       .from(chatMessages)
-      .where(eq(chatMessages.id, id))
+      .where(and(eq(chatMessages.id, id), eq(chatMessages.organizationId, organizationId)))
       .limit(1);
 
     if (!message) {
@@ -27,6 +28,13 @@ export async function GET(
     const [membership] = await db
       .select({ id: chatMembers.id })
       .from(chatMembers)
+      .innerJoin(
+        chatChannels,
+        and(
+          eq(chatChannels.id, chatMembers.channelId),
+          eq(chatChannels.organizationId, organizationId)
+        )
+      )
       .where(and(eq(chatMembers.channelId, message.channelId), eq(chatMembers.userId, user.id)))
       .limit(1);
 

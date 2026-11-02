@@ -30,11 +30,11 @@ Create products/prices in Stripe, put price IDs on plans (platform admin API), s
 ## 7. Make a platform admin
 `UPDATE users SET is_platform_admin = true WHERE email = 'you@example.com';` (deliberately not self-service.)
 
-## 8. Known limitations / external configuration still required
-- No live SMTP, Stripe, or DNS/hosting configured in this environment — registration, verification, invites and checkout are implemented but report `not_configured` honestly until keys are set.
-- Existing AR tables beyond claims/practices/patients are not yet org-scoped; org scoping is enforced for new SaaS surfaces (orgs, domains, invitations, billing). Extend `organization_id` scoping module-by-module before marketing strict isolation for those modules, and backfill only via manual reconciliation.
-- MFA, SSO, and automated Vercel domain provisioning are not implemented (APIs/templates are ready for them).
-- Legal pages are templates requiring counsel review. No HIPAA-compliance claim is made.
+## 8. Multi-tenant isolation, MFA & external configuration
+- **Strict Operational Multi-Tenancy (`drizzle/0006_multi_tenant_isolation.sql`):** All 28 operational tables (`claims`, `practices`, `patients`, `payments`, `era_files`, `denial_analyses`, `billing_tasks`, `signoffs`, `authorizations`, `coding_requests`, `chat_channels`, `ocr_scans`, `e_signatures`, `notifications`, etc.) enforce `organization_id` scoping in Drizzle queries, cross-entity ownership validation, session-bound `active_organization_id` workspace switching (`POST /api/organizations/switch`), and PostgreSQL Row-Level Security (`ENABLE` + `FORCE ROW LEVEL SECURITY`).
+- **TOTP MFA (`user_mfa`):** RFC 6238 authenticator setup, recovery codes, and login challenge (`GET/POST/DELETE /api/account/mfa` + `POST /api/auth/login`).
+- **Zero Demo Data in Code:** Hardcoded demo users and synthetic claim generators are removed; `/api/seed` initializes only standard CARC/RARC denial codes and subscription plans. Optional test workspaces can be provisioned exclusively via an encrypted runtime `TENANT_BOOTSTRAP_CONFIG` environment variable without committing credentials.
+- **Integrations & Compliance:** Without live SMTP, Stripe, or DNS/hosting keys configured, registration, verification, invites and checkout report `not_configured` honestly. Legal pages are templates requiring counsel review, and software controls alone do not constitute HIPAA certification — see `docs/HIPAA_READINESS.md` for technical vs administrative/BAA requirements.
 
 ## 9. Security & launch checklist
 - [ ] Rotate any dev credentials; disable `/api/seed` in production; set strong `JWT_SECRET`
@@ -75,5 +75,5 @@ Pick **one** method — real emails/passwords must never be committed:
 - **Robustness:** invalid JSON / malformed claim IDs returned 500s (now 400), pagination `page`/`limit` is clamped (1–100), and the AI page shows a real error + Retry state instead of silently claiming "No analyses yet".
 - Regression tests: `node tests/denial-analysis.test.mjs` (10 checks against the real engine).
 
-## 14. Troubleshooting: "An error occurred during login" / "Seed failed" / Switching Neon Databases
-`/api/health` reports database reachability and schema readiness without exposing secrets. When switching to a brand-new empty Neon database in Vercel (setting `DATABASE_URL` and optionally `DATABASE_URL_POOLED`), hitting `/api/health`, `/login` (or **Seed Database**), or `/register` **automatically bootstraps the full Drizzle schema (`0000`–`0004`)** on first request using an idempotent direct connection and PostgreSQL advisory lock — no local CLI step required (though `npm run db:migrate` also runs all migrations idempotently and verifies core tables). Seed is idempotent: re-running reactivates demo users (passwords are not reset) and a single bad denial code no longer aborts the whole seed.
+## 14. Troubleshooting: Database Bootstrapping & Switching Neon Databases
+`/api/health` reports database reachability and schema readiness without exposing secrets. When switching to a brand-new empty Neon database in Vercel (setting `DATABASE_URL` and optionally `DATABASE_URL_POOLED`), hitting `/api/health`, `/login`, or `/register` **automatically bootstraps the full Drizzle schema (`0000`–`0006`), standard CARC/RARC catalog, and default plans** on first request using an idempotent direct connection and PostgreSQL advisory lock — no local CLI step required (though `npm run db:migrate` also runs all migrations idempotently and verifies core tables).

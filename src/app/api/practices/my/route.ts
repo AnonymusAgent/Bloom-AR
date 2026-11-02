@@ -1,31 +1,53 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/db';
-import { practices, userPracticeAssignments } from '@/db/schema';
-import { eq, inArray } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { practices } from '@/db/schema';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getUserAuthorizedPracticeIds } from '@/lib/rbac';
+import { requireTenantContext } from '@/lib/tenant-context';
 
-/**
- * Returns only the practices the current user is authorized to access.
- * Regular users get their assigned practices.
- * Admins/Supervisors/Managers get all active practices.
- */
 export async function GET() {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
-    const authorized = await getUserAuthorizedPracticeIds(user);
+    const authorized = await getUserAuthorizedPracticeIds(ctx.user, ctx.organizationId);
 
     let result: Array<{ id: string; name: string; code: string; specialty: string | null }> = [];
     if (authorized === 'all') {
-      result = await db.select({ id: practices.id, name: practices.name, code: practices.code, specialty: practices.specialty })
-        .from(practices).where(eq(practices.isActive, true)).orderBy(practices.name);
+      result = await db
+        .select({
+          id: practices.id,
+          name: practices.name,
+          code: practices.code,
+          specialty: practices.specialty,
+        })
+        .from(practices)
+        .where(
+          and(
+            eq(practices.organizationId, ctx.organizationId),
+            eq(practices.isActive, true)
+          )
+        )
+        .orderBy(practices.name);
     } else if (authorized.length === 0) {
       result = [];
     } else {
-      result = await db.select({ id: practices.id, name: practices.name, code: practices.code, specialty: practices.specialty })
-        .from(practices).where(inArray(practices.id, authorized)).orderBy(practices.name);
+      result = await db
+        .select({
+          id: practices.id,
+          name: practices.name,
+          code: practices.code,
+          specialty: practices.specialty,
+        })
+        .from(practices)
+        .where(
+          and(
+            eq(practices.organizationId, ctx.organizationId),
+            inArray(practices.id, authorized)
+          )
+        )
+        .orderBy(practices.name);
     }
 
     return NextResponse.json({ practices: result });

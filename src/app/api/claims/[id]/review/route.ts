@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, claimStatusHistory, claimNotes } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser, canReviewClaims } from '@/lib/auth';
+import { and, eq } from 'drizzle-orm';
+import { canReviewClaims } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { createNotification, NOTIFICATION_TEMPLATES } from '@/lib/notifications';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(
   request: NextRequest,
@@ -13,8 +14,12 @@ export async function POST(
 ) {
   try {
     await ensureSaaSColumns();
-    const user = await getCurrentUser();
-    if (!user || !canReviewClaims(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    if (!canReviewClaims(user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -39,7 +44,7 @@ export async function POST(
     const [claim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .limit(1);
 
     if (!claim) {
@@ -85,7 +90,10 @@ export async function POST(
         extraUpdate.reworkReason = trimmedComments;
         extraUpdate.reworkCount = ((claim.reworkCount as number) || 0) + 1;
         auditAction = AUDIT_ACTIONS.CLAIM_REJECTED;
-        notificationTemplate = NOTIFICATION_TEMPLATES.claimRejected(claim.claimNumber, trimmedComments);
+        notificationTemplate = NOTIFICATION_TEMPLATES.claimRejected(
+          claim.claimNumber,
+          trimmedComments
+        );
         break;
       }
       case 'rework': {
@@ -94,7 +102,10 @@ export async function POST(
         extraUpdate.reworkReason = trimmedComments;
         extraUpdate.reworkCount = ((claim.reworkCount as number) || 0) + 1;
         auditAction = AUDIT_ACTIONS.CLAIM_REWORK_REQUESTED;
-        notificationTemplate = NOTIFICATION_TEMPLATES.reworkRequested(claim.claimNumber, trimmedComments);
+        notificationTemplate = NOTIFICATION_TEMPLATES.reworkRequested(
+          claim.claimNumber,
+          trimmedComments
+        );
         break;
       }
       default:
@@ -112,10 +123,11 @@ export async function POST(
         updatedAt: now,
         ...extraUpdate,
       })
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .returning();
 
     await db.insert(claimStatusHistory).values({
+      organizationId,
       claimId: id,
       previousStatus: claim.status,
       newStatus,
@@ -124,6 +136,7 @@ export async function POST(
     });
 
     await db.insert(claimNotes).values({
+      organizationId,
       claimId: id,
       userId: user.id,
       note: trimmedComments || `Claim ${action}d by supervisor`,
@@ -133,6 +146,7 @@ export async function POST(
     const recipient = claim.workedBy || claim.assignedTo;
     if (recipient) {
       await createNotification({
+        organizationId,
         userId: recipient,
         type: notificationTemplate.type,
         title: notificationTemplate.title,
@@ -142,12 +156,18 @@ export async function POST(
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: auditAction,
       entityType: 'claim',
       entityId: id,
       previousValue: { status: claim.status, workflowStatus: claim.workflowStatus },
-      newValue: { status: newStatus, workflowStatus: newWorkflowStatus, reviewComments: trimmedComments },
+      newValue: {
+        status: newStatus,
+        workflowStatus: newWorkflowStatus,
+        reviewComments: trimmedComments,
+      },
       ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
       userAgent: request.headers.get('user-agent') || undefined,
     });

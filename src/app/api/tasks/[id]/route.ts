@@ -1,72 +1,88 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { billingTasks, users, practices, taskNotes, taskDocuments, taskStatusHistory, signoffs } from '@/db/schema';
-import { eq, desc } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import {
+  billingTasks,
+  users,
+  practices,
+  taskNotes,
+  taskDocuments,
+  taskStatusHistory,
+  signoffs,
+} from '@/db/schema';
+import { and, eq, desc } from 'drizzle-orm';
+import { isSupervisorOrAbove } from '@/lib/auth';
+import type { User } from '@/db/schema';
 import { canViewUser } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { cleanDate } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 async function canAccessTask(
-  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
-  task: typeof billingTasks.$inferSelect
+  user: User,
+  task: typeof billingTasks.$inferSelect,
+  organizationId: string,
+  isReadOnly: boolean
 ): Promise<boolean> {
-  if (isSupervisorOrAbove(user.role)) return true;
+  if (task.organizationId !== organizationId) return false;
+  if (isReadOnly || isSupervisorOrAbove(user.role)) return true;
   if (task.assignedBy === user.id) return true;
   if (!task.assignedTo) return false;
-  return canViewUser(user, task.assignedTo);
+  return canViewUser(user, task.assignedTo, organizationId);
 }
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
 
     const [task] = await db
       .select()
       .from(billingTasks)
-      .where(eq(billingTasks.id, id))
+      .where(and(eq(billingTasks.id, id), eq(billingTasks.organizationId, organizationId)))
       .limit(1);
 
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // Check access
-    if (!(await canAccessTask(user, task))) {
+    if (!(await canAccessTask(user, task, organizationId, ctx.isReadOnly))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
-    // Get assignee details
     let assignee = null;
     if (task.assignedTo) {
       const [assigneeData] = await db
-        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email })
+        .select({
+          id: users.id,
+          firstName: users.firstName,
+          lastName: users.lastName,
+          email: users.email,
+        })
         .from(users)
         .where(eq(users.id, task.assignedTo))
         .limit(1);
       assignee = assigneeData;
     }
 
-    // Get practice details
     let practice = null;
     if (task.practiceId) {
       const [practiceData] = await db
         .select({ id: practices.id, name: practices.name, code: practices.code })
         .from(practices)
-        .where(eq(practices.id, task.practiceId))
+        .where(
+          and(eq(practices.id, task.practiceId), eq(practices.organizationId, organizationId))
+        )
         .limit(1);
       practice = practiceData;
     }
 
-    // Get notes
     const notes = await db
       .select({
         id: taskNotes.id,
@@ -82,7 +98,6 @@ export async function GET(
       .where(eq(taskNotes.taskId, id))
       .orderBy(desc(taskNotes.createdAt));
 
-    // Get documents
     const documents = await db
       .select({
         id: taskDocuments.id,
@@ -97,7 +112,6 @@ export async function GET(
       .where(eq(taskDocuments.taskId, id))
       .orderBy(desc(taskDocuments.createdAt));
 
-    // Get status history
     const statusHistory = await db
       .select({
         id: taskStatusHistory.id,
@@ -113,11 +127,10 @@ export async function GET(
       .where(eq(taskStatusHistory.taskId, id))
       .orderBy(desc(taskStatusHistory.createdAt));
 
-    // Get signoffs
     const taskSignoffs = await db
       .select()
       .from(signoffs)
-      .where(eq(signoffs.taskId, id))
+      .where(and(eq(signoffs.taskId, id), eq(signoffs.organizationId, organizationId)))
       .orderBy(desc(signoffs.createdAt));
 
     return NextResponse.json({
@@ -126,12 +139,12 @@ export async function GET(
         assignee,
         practice,
       },
-      notes: notes.map(n => ({
+      notes: notes.map((n) => ({
         ...n,
         userName: n.userName && n.userLastName ? `${n.userName} ${n.userLastName}` : 'Unknown',
       })),
       documents,
-      statusHistory: statusHistory.map(h => ({
+      statusHistory: statusHistory.map((h) => ({
         ...h,
         userName: h.userName && h.userLastName ? `${h.userName} ${h.userLastName}` : 'Unknown',
       })),
@@ -139,10 +152,7 @@ export async function GET(
     });
   } catch (error) {
     console.error('Get task error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch task' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch task' }, { status: 500 });
   }
 }
 
@@ -151,10 +161,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
     const body = await request.json();
@@ -162,21 +172,19 @@ export async function PATCH(
     const [existingTask] = await db
       .select()
       .from(billingTasks)
-      .where(eq(billingTasks.id, id))
+      .where(and(eq(billingTasks.id, id), eq(billingTasks.organizationId, organizationId)))
       .limit(1);
 
     if (!existingTask) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // Check access
-    if (!(await canAccessTask(user, existingTask))) {
+    if (!(await canAccessTask(user, existingTask, organizationId, false))) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
     const updateData: Partial<typeof billingTasks.$inferInsert> = {};
 
-    // Update allowed fields
     if (body.title !== undefined) updateData.title = body.title;
     if (body.description !== undefined) updateData.description = body.description;
     if (body.patientName !== undefined) updateData.patientName = body.patientName;
@@ -184,13 +192,14 @@ export async function PATCH(
     if (body.authNumber !== undefined) updateData.authNumber = body.authNumber;
     if (body.referralNumber !== undefined) updateData.referralNumber = body.referralNumber;
     if (body.serviceDate !== undefined) updateData.serviceDate = cleanDate(body.serviceDate);
-    if (body.expirationDate !== undefined) updateData.expirationDate = cleanDate(body.expirationDate);
+    if (body.expirationDate !== undefined) {
+      updateData.expirationDate = cleanDate(body.expirationDate);
+    }
     if (body.dueDate !== undefined) updateData.dueDate = cleanDate(body.dueDate);
     if (body.notes !== undefined) updateData.notes = body.notes;
     if (body.result !== undefined) updateData.result = body.result;
     if (body.priority !== undefined) updateData.priority = body.priority;
 
-    // Status change
     if (body.status && body.status !== existingTask.status) {
       updateData.status = body.status;
 
@@ -199,8 +208,8 @@ export async function PATCH(
         updateData.completedBy = user.id;
       }
 
-      // Create status history entry
       await db.insert(taskStatusHistory).values({
+        organizationId,
         taskId: id,
         previousStatus: existingTask.status,
         newStatus: body.status,
@@ -214,16 +223,18 @@ export async function PATCH(
     const [updatedTask] = await db
       .update(billingTasks)
       .set(updateData)
-      .where(eq(billingTasks.id, id))
+      .where(and(eq(billingTasks.id, id), eq(billingTasks.organizationId, organizationId)))
       .returning();
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'task_updated',
       entityType: 'billingTask',
       entityId: id,
-      previousValue: existingTask,
-      newValue: updatedTask,
+      previousValue: { status: existingTask.status },
+      newValue: { status: updatedTask.status },
       ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
       userAgent: request.headers.get('user-agent') || undefined,
     });
@@ -231,9 +242,6 @@ export async function PATCH(
     return NextResponse.json({ task: updatedTask });
   } catch (error) {
     console.error('Update task error:', error);
-    return NextResponse.json(
-      { error: 'Failed to update task' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update task' }, { status: 500 });
   }
 }

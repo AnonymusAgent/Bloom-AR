@@ -1,19 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { billingTasks, users, practices, taskStatusHistory } from '@/db/schema';
-import { eq, and, or, ilike, desc, inArray, gte, lte, sql } from 'drizzle-orm';
-import { getCurrentUser, canAssignTasks } from '@/lib/auth';
-import { getUserAuthorizedUserIds } from '@/lib/rbac';
+import { eq, and, or, ilike, desc, inArray, sql } from 'drizzle-orm';
+import { canAssignTasks } from '@/lib/auth';
+import {
+  getUserAuthorizedUserIds,
+  verifyPracticeInOrg,
+  verifyClaimInOrg,
+  verifyUserInOrg,
+} from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
 import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const searchParams = request.nextUrl.searchParams;
     const search = searchParams.get('search')?.trim();
@@ -24,12 +30,15 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(searchParams.get('page'));
     const limit = cleanLimit(searchParams.get('limit'), 20, 100);
 
-    const conditions = [];
+    const conditions = [eq(billingTasks.organizationId, organizationId)];
 
-    // Role-based filtering: admins/supervisors/managers see all; team/senior leads see their team; regular users see their own
-    const authorizedUsers = await getUserAuthorizedUserIds(user);
-    if (authorizedUsers !== 'all') {
-      conditions.push(inArray(billingTasks.assignedTo, authorizedUsers));
+    if (!ctx.isReadOnly && !['administrator', 'supervisor', 'manager'].includes(user.role)) {
+      const authorizedUsers = await getUserAuthorizedUserIds(user, organizationId);
+      if (authorizedUsers.length > 0) {
+        conditions.push(inArray(billingTasks.assignedTo, authorizedUsers));
+      } else {
+        conditions.push(eq(billingTasks.assignedTo, user.id));
+      }
     }
 
     if (search) {
@@ -39,12 +48,23 @@ export async function GET(request: NextRequest) {
           ilike(billingTasks.patientName, `%${search}%`),
           ilike(billingTasks.authNumber, `%${search}%`),
           ilike(billingTasks.referralNumber, `%${search}%`)
-        )
+        )!
       );
     }
 
     if (category) {
-      conditions.push(eq(billingTasks.category, category as 'prior_authorization' | 'referral_management' | 'verification_of_benefits' | 'charge_entry' | 'payment_posting' | 'custom'));
+      conditions.push(
+        eq(
+          billingTasks.category,
+          category as
+            | 'prior_authorization'
+            | 'referral_management'
+            | 'verification_of_benefits'
+            | 'charge_entry'
+            | 'payment_posting'
+            | 'custom'
+        )
+      );
     }
 
     if (status) {
@@ -60,15 +80,13 @@ export async function GET(request: NextRequest) {
       conditions.push(eq(billingTasks.practiceId, practiceId));
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const whereClause = and(...conditions);
 
-    // Get total count
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(billingTasks)
       .where(whereClause);
 
-    // Get tasks
     const tasks = await db
       .select({
         id: billingTasks.id,
@@ -95,33 +113,38 @@ export async function GET(request: NextRequest) {
       .limit(limit)
       .offset((page - 1) * limit);
 
-    // Get assignee names and practice names
-    const tasksWithDetails = await Promise.all(
-      tasks.map(async (task) => {
-        let assigneeName = null;
-        let practiceName = null;
-
-        if (task.assignedTo) {
-          const [assignee] = await db
-            .select({ firstName: users.firstName, lastName: users.lastName })
-            .from(users)
-            .where(eq(users.id, task.assignedTo))
-            .limit(1);
-          assigneeName = assignee ? `${assignee.firstName} ${assignee.lastName}` : null;
-        }
-
-        if (task.practiceId) {
-          const [practice] = await db
-            .select({ name: practices.name })
-            .from(practices)
-            .where(eq(practices.id, task.practiceId))
-            .limit(1);
-          practiceName = practice?.name || null;
-        }
-
-        return { ...task, assigneeName, practiceName };
-      })
+    const assigneeIds = Array.from(
+      new Set(tasks.map((t) => t.assignedTo).filter((id): id is string => Boolean(id)))
     );
+    const practiceIds = Array.from(
+      new Set(tasks.map((t) => t.practiceId).filter((id): id is string => Boolean(id)))
+    );
+
+    const userRows =
+      assigneeIds.length > 0
+        ? await db
+            .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+            .from(users)
+            .where(inArray(users.id, assigneeIds))
+        : [];
+    const practiceRows =
+      practiceIds.length > 0
+        ? await db
+            .select({ id: practices.id, name: practices.name })
+            .from(practices)
+            .where(
+              and(eq(practices.organizationId, organizationId), inArray(practices.id, practiceIds))
+            )
+        : [];
+
+    const namesMap = new Map(userRows.map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
+    const practicesMap = new Map(practiceRows.map((p) => [p.id, p.name]));
+
+    const tasksWithDetails = tasks.map((task) => ({
+      ...task,
+      assigneeName: task.assignedTo ? namesMap.get(task.assignedTo) || null : null,
+      practiceName: task.practiceId ? practicesMap.get(task.practiceId) || null : null,
+    }));
 
     return NextResponse.json({
       tasks: tasksWithDetails,
@@ -134,17 +157,18 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Get tasks error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch tasks' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch tasks' }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !canAssignTasks(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    if (!canAssignTasks(user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -166,21 +190,37 @@ export async function POST(request: NextRequest) {
     } = body;
 
     if (!title || !category) {
+      return NextResponse.json({ error: 'Title and category are required' }, { status: 400 });
+    }
+
+    const safeAssignedTo = cleanUuid(assignedTo);
+    const safePracticeId = cleanUuid(practiceId);
+    const safeClaimId = cleanUuid(claimId);
+
+    if (safePracticeId && !(await verifyPracticeInOrg(safePracticeId, organizationId))) {
       return NextResponse.json(
-        { error: 'Title and category are required' },
+        { error: 'Practice not found in your organization' },
+        { status: 400 }
+      );
+    }
+    if (safeClaimId && !(await verifyClaimInOrg(safeClaimId, organizationId))) {
+      return NextResponse.json({ error: 'Claim not found in your organization' }, { status: 400 });
+    }
+    if (safeAssignedTo && !(await verifyUserInOrg(safeAssignedTo, organizationId))) {
+      return NextResponse.json(
+        { error: 'Assignee not found in your organization' },
         { status: 400 }
       );
     }
 
-    const safeAssignedTo = cleanUuid(assignedTo);
-
     const taskData: typeof billingTasks.$inferInsert = {
+      organizationId,
       title: String(title).trim(),
       description: description ? String(description).trim() : null,
       category,
       priority: priority || 'normal',
-      practiceId: cleanUuid(practiceId),
-      claimId: cleanUuid(claimId),
+      practiceId: safePracticeId,
+      claimId: safeClaimId,
       patientName: patientName ? String(patientName).trim() : null,
       patientDob: cleanDate(patientDob),
       insuranceName: insuranceName ? String(insuranceName).trim() : null,
@@ -193,22 +233,19 @@ export async function POST(request: NextRequest) {
       assignedAt: safeAssignedTo ? new Date() : undefined,
     };
 
-    const [newTask] = await db
-      .insert(billingTasks)
-      .values(taskData)
-      .returning();
+    const [newTask] = await db.insert(billingTasks).values(taskData).returning();
 
-    // Create initial status history
     await db.insert(taskStatusHistory).values({
+      organizationId,
       taskId: newTask.id,
       newStatus: newTask.status,
       changedBy: user.id,
       reason: 'Task created',
     });
 
-    // Notify assignee
     if (safeAssignedTo) {
       await createNotification({
+        organizationId,
         userId: safeAssignedTo,
         type: 'task_assigned',
         title: 'New Task Assigned',
@@ -217,11 +254,13 @@ export async function POST(request: NextRequest) {
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'task_created',
       entityType: 'billingTask',
       entityId: newTask.id,
-      newValue: { title, category, assignedTo },
+      newValue: { title, category, assignedTo: safeAssignedTo },
       ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
       userAgent: request.headers.get('user-agent') || undefined,
     });
@@ -229,9 +268,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ task: newTask });
   } catch (error) {
     console.error('Create task error:', error);
-    return NextResponse.json(
-      { error: 'Failed to create task' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });
   }
 }

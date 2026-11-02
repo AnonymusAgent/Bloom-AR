@@ -1,21 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { eSignatures } from '@/db/schema';
-import { desc, sql } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { eq, desc, sql } from 'drizzle-orm';
+import { verifyClaimInOrg } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { cleanUuid, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { organizationId } = auth.ctx;
 
     const sp = request.nextUrl.searchParams;
     const page = cleanPage(sp.get('page'));
     const limit = cleanLimit(sp.get('limit'), 20, 100);
 
-    const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(eSignatures);
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(eSignatures)
+      .where(eq(eSignatures.organizationId, organizationId));
 
     const rows = await db
       .select({
@@ -29,6 +34,7 @@ export async function GET(request: NextRequest) {
         relatedEntityType: eSignatures.relatedEntityType,
       })
       .from(eSignatures)
+      .where(eq(eSignatures.organizationId, organizationId))
       .orderBy(desc(eSignatures.createdAt))
       .limit(limit)
       .offset((page - 1) * limit);
@@ -45,8 +51,10 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const body = await request.json();
     const {
@@ -66,9 +74,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const relatedClaimId = cleanUuid(body.relatedClaimId);
+    if (relatedClaimId && !(await verifyClaimInOrg(relatedClaimId, organizationId))) {
+      return NextResponse.json(
+        { error: 'Referenced claim not found in your organization' },
+        { status: 403 }
+      );
+    }
+
     const [sig] = await db
       .insert(eSignatures)
       .values({
+        organizationId,
         documentType: documentType || 'general',
         documentTitle: String(documentTitle).trim(),
         documentContent: documentContent || null,
@@ -78,7 +95,7 @@ export async function POST(request: NextRequest) {
         signerEmail: user.email,
         ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
         userAgent: request.headers.get('user-agent') || undefined,
-        relatedClaimId: cleanUuid(body.relatedClaimId),
+        relatedClaimId,
         relatedEntityType: relatedEntityType || null,
         relatedEntityId: cleanUuid(body.relatedEntityId),
         signedBy: user.id,
@@ -86,7 +103,9 @@ export async function POST(request: NextRequest) {
       .returning();
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'document_signed',
       entityType: 'eSignature',
       entityId: sig.id,

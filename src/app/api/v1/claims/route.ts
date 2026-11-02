@@ -2,57 +2,59 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims } from '@/db/schema';
 import { desc, ilike, or, sql, eq, and, inArray } from 'drizzle-orm';
-import { authenticateApiKey } from '@/lib/api-auth';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { isSupervisorOrAbove } from '@/lib/auth';
 import { getUserAuthorizedPracticeIds, getUserAuthorizedUserIds } from '@/lib/rbac';
 import { cleanPage, cleanLimit } from '@/lib/sanitize';
-
-async function getAuth(request: NextRequest) {
-  const apiAuth = await authenticateApiKey(request);
-  if (apiAuth) return { user: apiAuth.user, organizationId: apiAuth.apiKey.organizationId };
-  const user = await getCurrentUser();
-  return user ? { user, organizationId: null } : null;
-}
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const auth = await getAuth(request);
-    if (!auth || !auth.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    const { user, organizationId } = auth;
+    const auth = await requireTenantContext({
+      request,
+      allowApiKey: true,
+      requiredApiScope: 'claims:read',
+    });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const sp = request.nextUrl.searchParams;
     const search = sp.get('search')?.trim();
     const page = cleanPage(sp.get('page'));
     const limit = cleanLimit(sp.get('limit'), 50, 100);
 
-    const conditions = [];
+    // Unconditional organization boundary — never omitted regardless of session vs API key!
+    const conditions = [eq(claims.organizationId, organizationId)];
 
-    if (organizationId) {
-      conditions.push(eq(claims.organizationId, organizationId));
-    }
-
-    if (!isSupervisorOrAbove(user.role)) {
-      const authorizedPractices = await getUserAuthorizedPracticeIds(user);
-      const authorizedUsers = await getUserAuthorizedUserIds(user);
+    if (!isSupervisorOrAbove(user.role) && !ctx.isReadOnly) {
+      const authorizedPractices = await getUserAuthorizedPracticeIds(user, organizationId);
+      const authorizedUsers = await getUserAuthorizedUserIds(user, organizationId);
       const visibility = [];
-      if (authorizedUsers !== 'all' && authorizedUsers.length > 0) {
+      if (authorizedUsers.length > 0) {
         visibility.push(inArray(claims.assignedTo, authorizedUsers));
       }
       if (authorizedPractices !== 'all' && authorizedPractices.length > 0) {
         visibility.push(inArray(claims.practiceId, authorizedPractices));
       }
-      if (visibility.length === 0) {
-        return NextResponse.json({ data: [], meta: { page, limit, total: 0, totalPages: 0 } });
+      if (authorizedPractices !== 'all') {
+        if (visibility.length === 0) {
+          return NextResponse.json({ data: [], meta: { page, limit, total: 0, totalPages: 0 } });
+        }
+        conditions.push(visibility.length === 1 ? visibility[0] : or(...visibility)!);
       }
-      conditions.push(visibility.length === 1 ? visibility[0] : or(...visibility)!);
     }
 
     if (search) {
-      conditions.push(or(ilike(claims.claimNumber, `%${search}%`), ilike(claims.patientName, `%${search}%`))!);
+      conditions.push(
+        or(ilike(claims.claimNumber, `%${search}%`), ilike(claims.patientName, `%${search}%`))!
+      );
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-    const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(claims).where(whereClause);
+    const whereClause = and(...conditions);
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(claims)
+      .where(whereClause);
 
     const rows = await db
       .select({

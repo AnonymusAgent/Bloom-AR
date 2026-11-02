@@ -2,17 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { signoffs, billingTasks, claims, users } from '@/db/schema';
 import { eq, and, desc, sql, inArray } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove, canReviewSignoffs } from '@/lib/auth';
+import { isSupervisorOrAbove, canReviewSignoffs } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
-import { createNotification } from '@/lib/notifications';
 import { cleanUuid, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const searchParams = request.nextUrl.searchParams;
     const status = searchParams.get('status');
@@ -20,11 +20,9 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(searchParams.get('page'));
     const limit = cleanLimit(searchParams.get('limit'), 20, 100);
 
-    const conditions = [];
+    const conditions = [eq(signoffs.organizationId, organizationId)];
 
-    // Role-based filtering
-    if (!canReviewSignoffs(user.role)) {
-      // Regular users can only see their own signoffs
+    if (!ctx.isReadOnly && !canReviewSignoffs(user.role)) {
       conditions.push(eq(signoffs.submittedBy, user.id));
     }
 
@@ -36,15 +34,13 @@ export async function GET(request: NextRequest) {
       conditions.push(eq(signoffs.entityType, entityType));
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const whereClause = and(...conditions);
 
-    // Get total count
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(signoffs)
       .where(whereClause);
 
-    // Get signoffs
     const result = await db
       .select({
         id: signoffs.id,
@@ -68,50 +64,61 @@ export async function GET(request: NextRequest) {
       .limit(limit)
       .offset((page - 1) * limit);
 
-    // Get submitter names and entity details
-    const signoffsWithDetails = await Promise.all(
-      result.map(async (signoff) => {
-        const [submitter] = await db
-          .select({ firstName: users.firstName, lastName: users.lastName })
-          .from(users)
-          .where(eq(users.id, signoff.submittedBy))
-          .limit(1);
-
-        let entityTitle = '';
-        if (signoff.taskId) {
-          const [task] = await db
-            .select({ title: billingTasks.title })
-            .from(billingTasks)
-            .where(eq(billingTasks.id, signoff.taskId))
-            .limit(1);
-          entityTitle = task?.title || 'Unknown Task';
-        } else if (signoff.claimId) {
-          const [claim] = await db
-            .select({ claimNumber: claims.claimNumber })
-            .from(claims)
-            .where(eq(claims.id, signoff.claimId))
-            .limit(1);
-          entityTitle = claim?.claimNumber || 'Unknown Claim';
-        }
-
-        let reviewerName = null;
-        if (signoff.reviewedBy) {
-          const [reviewer] = await db
-            .select({ firstName: users.firstName, lastName: users.lastName })
-            .from(users)
-            .where(eq(users.id, signoff.reviewedBy))
-            .limit(1);
-          reviewerName = reviewer ? `${reviewer.firstName} ${reviewer.lastName}` : null;
-        }
-
-        return {
-          ...signoff,
-          submitterName: submitter ? `${submitter.firstName} ${submitter.lastName}` : 'Unknown',
-          entityTitle,
-          reviewerName,
-        };
-      })
+    const userIds = Array.from(
+      new Set(
+        result.flatMap((s) =>
+          [s.submittedBy, s.reviewedBy].filter((id): id is string => Boolean(id))
+        )
+      )
     );
+    const taskIds = Array.from(
+      new Set(result.map((s) => s.taskId).filter((id): id is string => Boolean(id)))
+    );
+    const claimIds = Array.from(
+      new Set(result.map((s) => s.claimId).filter((id): id is string => Boolean(id)))
+    );
+
+    const userRows =
+      userIds.length > 0
+        ? await db
+            .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+            .from(users)
+            .where(inArray(users.id, userIds))
+        : [];
+    const taskRows =
+      taskIds.length > 0
+        ? await db
+            .select({ id: billingTasks.id, title: billingTasks.title })
+            .from(billingTasks)
+            .where(
+              and(
+                eq(billingTasks.organizationId, organizationId),
+                inArray(billingTasks.id, taskIds)
+              )
+            )
+        : [];
+    const claimRows =
+      claimIds.length > 0
+        ? await db
+            .select({ id: claims.id, claimNumber: claims.claimNumber })
+            .from(claims)
+            .where(and(eq(claims.organizationId, organizationId), inArray(claims.id, claimIds)))
+        : [];
+
+    const namesMap = new Map(userRows.map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
+    const tasksMap = new Map(taskRows.map((t) => [t.id, t.title]));
+    const claimsMap = new Map(claimRows.map((c) => [c.id, c.claimNumber]));
+
+    const signoffsWithDetails = result.map((signoff) => ({
+      ...signoff,
+      submitterName: namesMap.get(signoff.submittedBy) || 'Unknown',
+      entityTitle: signoff.taskId
+        ? tasksMap.get(signoff.taskId) || 'Unknown Task'
+        : signoff.claimId
+        ? claimsMap.get(signoff.claimId) || 'Unknown Claim'
+        : '',
+      reviewerName: signoff.reviewedBy ? namesMap.get(signoff.reviewedBy) || null : null,
+    }));
 
     return NextResponse.json({
       signoffs: signoffsWithDetails,
@@ -124,19 +131,16 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Get signoffs error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch signoffs' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch signoffs' }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const body = await request.json();
     const { entityType, submissionNotes, isAutomatic } = body;
@@ -151,12 +155,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify entity exists and user has access
-    if (entityType === 'task' && taskId) {
+    if (taskId) {
       const [task] = await db
         .select()
         .from(billingTasks)
-        .where(eq(billingTasks.id, taskId))
+        .where(and(eq(billingTasks.id, taskId), eq(billingTasks.organizationId, organizationId)))
         .limit(1);
 
       if (!task) {
@@ -167,16 +170,30 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Access denied' }, { status: 403 });
       }
 
-      // Update task status
       await db
         .update(billingTasks)
         .set({ status: 'submitted_for_signoff', updatedAt: new Date() })
-        .where(eq(billingTasks.id, taskId));
+        .where(and(eq(billingTasks.id, taskId), eq(billingTasks.organizationId, organizationId)));
+    }
+
+    if (claimId) {
+      const [claim] = await db
+        .select()
+        .from(claims)
+        .where(and(eq(claims.id, claimId), eq(claims.organizationId, organizationId)))
+        .limit(1);
+      if (!claim) {
+        return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
+      }
+      if (claim.assignedTo !== user.id && !isSupervisorOrAbove(user.role)) {
+        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+      }
     }
 
     const [newSignoff] = await db
       .insert(signoffs)
       .values({
+        organizationId,
         entityType,
         entityId,
         taskId,
@@ -188,7 +205,9 @@ export async function POST(request: NextRequest) {
       .returning();
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'signoff_submitted',
       entityType: 'signoff',
       entityId: newSignoff.id,
@@ -200,9 +219,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ signoff: newSignoff });
   } catch (error) {
     console.error('Create signoff error:', error);
-    return NextResponse.json(
-      { error: 'Failed to create signoff' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create signoff' }, { status: 500 });
   }
 }

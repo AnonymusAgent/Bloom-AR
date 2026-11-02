@@ -9,18 +9,21 @@ import {
   codingDocuments,
   claimDocuments,
   claimStatusHistory,
+  organizationMembers,
 } from '@/db/schema';
 import { eq, and, desc, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { isSupervisorOrAbove } from '@/lib/auth';
 import {
   canViewUser,
   getUserAuthorizedPracticeIds,
   getUserAuthorizedUserIds,
+  verifyUserInOrg,
 } from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
 import { cleanLimit, cleanPage, cleanUuid } from '@/lib/sanitize';
 import { analyzeClaimCoding } from '@/lib/coding/coding-checker';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 const VALID_CODING_STATUSES = [
   'sent_to_coding',
@@ -34,8 +37,10 @@ type CodingStatusValue = (typeof VALID_CODING_STATUSES)[number];
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const sp = request.nextUrl.searchParams;
     const status = sp.get('status');
@@ -45,35 +50,37 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(sp.get('page'));
     const limit = cleanLimit(sp.get('limit'), 20, 100);
 
-    const visibilityConditions = [];
-    if (!isSupervisorOrAbove(user.role)) {
-      const authPractices = await getUserAuthorizedPracticeIds(user);
-      const authUsers = await getUserAuthorizedUserIds(user);
+    const visibilityConditions = [eq(codingRequests.organizationId, organizationId)];
+    if (!ctx.isReadOnly && !isSupervisorOrAbove(user.role)) {
+      const authPractices = await getUserAuthorizedPracticeIds(user, organizationId);
+      const authUsers = await getUserAuthorizedUserIds(user, organizationId);
       const vis = [];
-      if (authUsers !== 'all' && authUsers.length > 0) {
+      if (authUsers.length > 0) {
         vis.push(inArray(codingRequests.sentBy, authUsers));
         vis.push(inArray(codingRequests.assignedTo, authUsers));
       }
       if (authPractices !== 'all' && authPractices.length > 0) {
         vis.push(inArray(claims.practiceId, authPractices));
       }
-      if (vis.length === 0) {
-        return NextResponse.json({
-          codingRequests: [],
-          queueStats: {
-            total: 0,
-            sent_to_coding: 0,
-            under_review: 0,
-            corrected: 0,
-            returned_to_billing: 0,
-            resubmitted: 0,
-            assignedToMe: 0,
-          },
-          assignableUsers: [],
-          pagination: { page, limit, total: 0, totalPages: 1 },
-        });
+      if (authPractices !== 'all') {
+        if (vis.length === 0) {
+          return NextResponse.json({
+            codingRequests: [],
+            queueStats: {
+              total: 0,
+              sent_to_coding: 0,
+              under_review: 0,
+              corrected: 0,
+              returned_to_billing: 0,
+              resubmitted: 0,
+              assignedToMe: 0,
+            },
+            assignableUsers: [],
+            pagination: { page, limit, total: 0, totalPages: 1 },
+          });
+        }
+        visibilityConditions.push(or(...vis)!);
       }
-      visibilityConditions.push(or(...vis)!);
     }
 
     const filterConditions = [...visibilityConditions];
@@ -112,9 +119,8 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const whereClause = filterConditions.length > 0 ? and(...filterConditions) : undefined;
-    const baseVisibilityWhere =
-      visibilityConditions.length > 0 ? and(...visibilityConditions) : undefined;
+    const whereClause = and(...filterConditions);
+    const baseVisibilityWhere = and(...visibilityConditions);
 
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -136,11 +142,7 @@ export async function GET(request: NextRequest) {
       .select({ myCount: sql<number>`count(*)::int` })
       .from(codingRequests)
       .leftJoin(claims, eq(codingRequests.claimId, claims.id))
-      .where(
-        baseVisibilityWhere
-          ? and(baseVisibilityWhere, eq(codingRequests.assignedTo, user.id))
-          : eq(codingRequests.assignedTo, user.id)
-      );
+      .where(and(baseVisibilityWhere, eq(codingRequests.assignedTo, user.id)));
 
     const rows = await db
       .select({
@@ -194,7 +196,7 @@ export async function GET(request: NextRequest) {
       new Set(rows.map((r) => r.practiceId).filter((pid): pid is string => Boolean(pid)))
     );
 
-    const authUserScope = await getUserAuthorizedUserIds(user);
+    const authUserScope = await getUserAuthorizedUserIds(user, organizationId);
 
     const userRows =
       userIds.length > 0
@@ -208,7 +210,9 @@ export async function GET(request: NextRequest) {
         ? await db
             .select({ id: practices.id, name: practices.name, code: practices.code })
             .from(practices)
-            .where(inArray(practices.id, practiceIds))
+            .where(
+              and(eq(practices.organizationId, organizationId), inArray(practices.id, practiceIds))
+            )
         : [];
     const docCounts =
       reqIds.length > 0
@@ -218,11 +222,16 @@ export async function GET(request: NextRequest) {
               cnt: sql<number>`count(*)::int`,
             })
             .from(codingDocuments)
-            .where(inArray(codingDocuments.codingRequestId, reqIds))
+            .where(
+              and(
+                eq(codingDocuments.organizationId, organizationId),
+                inArray(codingDocuments.codingRequestId, reqIds)
+              )
+            )
             .groupBy(codingDocuments.codingRequestId)
         : [];
     const assignableRows =
-      authUserScope === 'all'
+      authUserScope.length > 0
         ? await db
             .select({
               id: users.id,
@@ -231,19 +240,17 @@ export async function GET(request: NextRequest) {
               role: users.role,
             })
             .from(users)
-            .where(eq(users.isActive, true))
+            .innerJoin(
+              organizationMembers,
+              and(
+                eq(organizationMembers.userId, users.id),
+                eq(organizationMembers.organizationId, organizationId),
+                eq(organizationMembers.isActive, true)
+              )
+            )
+            .where(and(eq(users.isActive, true), inArray(users.id, authUserScope)))
             .limit(100)
-        : authUserScope.length > 0
-          ? await db
-              .select({
-                id: users.id,
-                firstName: users.firstName,
-                lastName: users.lastName,
-                role: users.role,
-              })
-              .from(users)
-              .where(and(eq(users.isActive, true), inArray(users.id, authUserScope)))
-          : [];
+        : [];
 
     const userMap = new Map(userRows.map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
     const practiceMap = new Map(practiceRows.map((p) => [p.id, `${p.code} — ${p.name}`]));
@@ -330,8 +337,10 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const body = await request.json();
     const claimId = cleanUuid(body.claimId);
@@ -339,15 +348,28 @@ export async function POST(request: NextRequest) {
     const { denialReason, comments } = body;
     if (!claimId) return NextResponse.json({ error: 'Valid Claim ID required' }, { status: 400 });
 
-    const [claim] = await db.select().from(claims).where(eq(claims.id, claimId)).limit(1);
+    const [claim] = await db
+      .select()
+      .from(claims)
+      .where(and(eq(claims.id, claimId), eq(claims.organizationId, organizationId)))
+      .limit(1);
     if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
 
+    if (assignedTo && assignedTo !== user.id && !(await verifyUserInOrg(assignedTo, organizationId))) {
+      return NextResponse.json(
+        { error: 'Assignee not found in your organization' },
+        { status: 400 }
+      );
+    }
+
     if (!isSupervisorOrAbove(user.role)) {
-      const authPractices = await getUserAuthorizedPracticeIds(user);
+      const authPractices = await getUserAuthorizedPracticeIds(user, organizationId);
       const allowedByPractice =
         authPractices === 'all' ||
         (claim.practiceId ? authPractices.includes(claim.practiceId) : false);
-      const allowedByAssignee = claim.assignedTo ? await canViewUser(user, claim.assignedTo) : false;
+      const allowedByAssignee = claim.assignedTo
+        ? await canViewUser(user, claim.assignedTo, organizationId)
+        : false;
       if (!allowedByPractice && !allowedByAssignee) {
         return NextResponse.json({ error: 'Access denied' }, { status: 403 });
       }
@@ -356,6 +378,7 @@ export async function POST(request: NextRequest) {
     const [codingReq] = await db
       .insert(codingRequests)
       .values({
+        organizationId,
         claimId,
         denialReason: denialReason || claim.denialReason || null,
         comments: comments || null,
@@ -367,8 +390,9 @@ export async function POST(request: NextRequest) {
     await db
       .update(claims)
       .set({ status: 'sent_to_coding', updatedAt: new Date() })
-      .where(eq(claims.id, claimId));
+      .where(and(eq(claims.id, claimId), eq(claims.organizationId, organizationId)));
     await db.insert(claimStatusHistory).values({
+      organizationId,
       claimId,
       previousStatus: claim.status,
       newStatus: 'sent_to_coding',
@@ -379,9 +403,12 @@ export async function POST(request: NextRequest) {
     const claimDocs = await db
       .select()
       .from(claimDocuments)
-      .where(eq(claimDocuments.claimId, claimId));
+      .where(
+        and(eq(claimDocuments.claimId, claimId), eq(claimDocuments.organizationId, organizationId))
+      );
     for (const doc of claimDocs) {
       await db.insert(codingDocuments).values({
+        organizationId,
         codingRequestId: codingReq.id,
         documentType: doc.documentType,
         fileName: doc.fileName,
@@ -393,6 +420,7 @@ export async function POST(request: NextRequest) {
 
     if (assignedTo && assignedTo !== user.id) {
       await createNotification({
+        organizationId,
         userId: assignedTo,
         type: 'task_assigned',
         title: 'Coding Request Assigned',
@@ -402,7 +430,9 @@ export async function POST(request: NextRequest) {
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'sent_to_coding',
       entityType: 'codingRequest',
       entityId: codingReq.id,

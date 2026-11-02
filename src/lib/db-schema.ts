@@ -7,6 +7,7 @@ import {
   makeStatementIdempotent,
   splitMigrationStatements,
 } from '@/db/migrations-sql';
+import { runEnvTenantBootstrapIfNeeded } from '@/lib/tenant-bootstrap';
 
 const CORE_TABLES = [
   'users',
@@ -16,16 +17,17 @@ const CORE_TABLES = [
   'era_files',
   'plans',
   'site_settings',
+  'billing_invoices',
+  'user_mfa',
 ] as const;
 
 /**
- * Self-healing additive schema guard + empty-DB auto-bootstrap.
+ * Self-healing additive schema guard + empty-DB auto-bootstrap + env-driven tenant provisioner.
  *
- * - If the connected database already has all core tables, runs the lightweight
- *   additive statements to guarantee migrations 0003/0004 columns exist.
- * - If core tables are missing (e.g. a brand-new Neon database connected in Vercel),
- *   automatically runs the full idempotent Drizzle migration suite (0000–0004)
+ * - If any core or multi-tenant isolation table (`billing_invoices`, `user_mfa`) is missing,
+ *   automatically runs the full idempotent Drizzle migration suite (0000–0006)
  *   using a serialized PostgreSQL advisory lock so zero local CLI step is required.
+ * - Executes `runEnvTenantBootstrapIfNeeded()` when `TENANT_BOOTSTRAP_CONFIG` is configured.
  */
 const STATEMENTS = [
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "email_verified_at" timestamp`,
@@ -38,6 +40,17 @@ const STATEMENTS = [
   `ALTER TABLE "organizations" ADD COLUMN IF NOT EXISTS "status" varchar(20) NOT NULL DEFAULT 'active'`,
   `ALTER TABLE "organizations" ADD COLUMN IF NOT EXISTS "onboarding_step" integer NOT NULL DEFAULT 0`,
   `ALTER TABLE "organizations" ADD COLUMN IF NOT EXISTS "onboarding_complete" boolean NOT NULL DEFAULT false`,
+  `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "active_organization_id" uuid`,
+  `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "last_active_at" timestamp NOT NULL DEFAULT now()`,
+  `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "ip_address" varchar(64)`,
+  `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "user_agent" text`,
+  `ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "mfa_verified_at" timestamp`,
+  `ALTER TABLE "organization_members" ADD COLUMN IF NOT EXISTS "operational_role" "user_role" NOT NULL DEFAULT 'ar_executive'`,
+  `ALTER TABLE "organization_members" ADD COLUMN IF NOT EXISTS "team_lead_id" uuid`,
+  `ALTER TABLE "organization_members" ADD COLUMN IF NOT EXISTS "is_active" boolean NOT NULL DEFAULT true`,
+  `ALTER TABLE "organization_members" ADD COLUMN IF NOT EXISTS "invited_by" uuid`,
+  `ALTER TABLE "organization_members" ADD COLUMN IF NOT EXISTS "updated_at" timestamp NOT NULL DEFAULT now()`,
+  `ALTER TABLE "organization_invitations" ADD COLUMN IF NOT EXISTS "operational_role" "user_role" NOT NULL DEFAULT 'ar_executive'`,
   `ALTER TABLE "claims" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `ALTER TABLE "practices" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `ALTER TABLE "patients" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
@@ -54,7 +67,7 @@ export interface SchemaStatus {
 
 async function queryMissingCoreTables(): Promise<string[]> {
   const rows = await db.execute(
-    sql`SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('users','organizations','claims','denial_codes','era_files','plans','site_settings')`
+    sql`SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('users','organizations','claims','denial_codes','era_files','plans','site_settings','billing_invoices','user_mfa')`
   );
   const present = new Set((rows.rows as { table_name: string }[]).map((r) => r.table_name));
   return CORE_TABLES.filter((t) => !present.has(t));
@@ -123,7 +136,6 @@ async function bootstrapFullSchema(): Promise<void> {
       client = await runtimePool.connect();
     }
 
-    // Use session advisory lock on direct connections to prevent cold-start DDL races
     if (dedicatedPool) {
       try {
         await client.query('SELECT pg_advisory_lock(82437001)');
@@ -187,10 +199,13 @@ export function ensureSaaSColumns(): Promise<SchemaStatus> {
         }
       }
 
+      if (missingTables.length === 0) {
+        await runEnvTenantBootstrapIfNeeded();
+      }
+
       return { ok: missingTables.length === 0, missingTables, bootstrapped };
     })();
 
-    // Don't cache failures forever — allow retry after the operator updates env vars / DB.
     cached.then((r) => {
       if (!r.ok) {
         setTimeout(() => {
@@ -206,7 +221,6 @@ export function schemaHint(missing: string[]) {
   return `Database schema is not ready (missing: ${missing.join(', ')}). Check /api/health or run "npm run db:migrate" with DATABASE_URL set — see docs/SAAS_SETUP.md.`;
 }
 
-/** Never leak connection strings or internals in an error shown to a client. */
 export function safeErrorDetail(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
   return msg.replace(/postgres(ql)?:\/\/\S+/gi, '[database-url]').slice(0, 300);
