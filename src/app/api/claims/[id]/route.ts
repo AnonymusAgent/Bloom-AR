@@ -9,46 +9,48 @@ import {
   claimDocuments,
   denialCodes,
 } from '@/db/schema';
-import { eq, desc, inArray } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { and, eq, desc, inArray } from 'drizzle-orm';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { ensureSaaSColumns, safeErrorDetail } from '@/lib/db-schema';
-import { cleanUuid, cleanDate } from '@/lib/sanitize';
+import { cleanDate } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    await ensureSaaSColumns();
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
     if (!UUID_RE.test(id)) {
       return NextResponse.json({ error: 'Invalid claim ID' }, { status: 400 });
     }
-    await ensureSaaSColumns();
 
     const [claim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .limit(1);
 
     if (!claim) {
       return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
     }
 
-    // Check access for frontline specialists
-    if (['ar_executive', 'billing_user'].includes(user.role) && claim.assignedTo !== user.id) {
+    if (
+      !ctx.isReadOnly &&
+      ['ar_executive', 'billing_user'].includes(user.role) &&
+      claim.assignedTo !== user.id
+    ) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
-    // Fault-isolated helper: a broken related lookup must never block opening the claim
     const safe = async <T,>(fn: () => Promise<T>, fallback: T, label: string): Promise<T> => {
       try {
         return await fn();
@@ -58,7 +60,6 @@ export async function GET(
       }
     };
 
-    // Resolve Practice details via claim.practiceId
     let practice: {
       id: string;
       name: string;
@@ -80,7 +81,7 @@ export async function GET(
               npi: practices.npi,
             })
             .from(practices)
-            .where(eq(practices.id, pId))
+            .where(and(eq(practices.id, pId), eq(practices.organizationId, organizationId)))
             .limit(1),
         [],
         'practice'
@@ -88,12 +89,15 @@ export async function GET(
       practice = practiceRows[0] ?? null;
     }
 
-    // Batch-resolve related users (assignee, worker, approver, reviewer, assigner)
     const initialUserIds = Array.from(
       new Set(
-        [claim.assignedTo, claim.workedBy, claim.approvedBy, claim.reviewedBy, claim.assignedBy].filter(
-          (uid): uid is string => Boolean(uid)
-        )
+        [
+          claim.assignedTo,
+          claim.workedBy,
+          claim.approvedBy,
+          claim.reviewedBy,
+          claim.assignedBy,
+        ].filter((uid): uid is string => Boolean(uid))
       )
     );
 
@@ -131,7 +135,6 @@ export async function GET(
     const approver = toPublicUser(claim.approvedBy);
     const reviewer = toPublicUser(claim.reviewedBy);
 
-    // Resolve team lead from assignee.teamLeadId (or fallback to assigner if supervisor/lead)
     let teamLead: { id: string; firstName: string; lastName: string; email: string } | null = null;
     if (assigneeFull?.teamLeadId) {
       const tlId: string = assigneeFull.teamLeadId;
@@ -159,7 +162,9 @@ export async function GET(
       const assigner = userMap.get(claim.assignedBy);
       if (
         assigner &&
-        ['team_lead', 'senior_lead', 'supervisor', 'manager', 'administrator'].includes(assigner.role)
+        ['team_lead', 'senior_lead', 'supervisor', 'manager', 'administrator'].includes(
+          assigner.role
+        )
       ) {
         teamLead = {
           id: assigner.id,
@@ -170,7 +175,6 @@ export async function GET(
       }
     }
 
-    // Get notes
     const notes = await safe(
       () =>
         db
@@ -191,7 +195,6 @@ export async function GET(
       'notes'
     );
 
-    // Get status history
     const statusHistory = await safe(
       () =>
         db
@@ -213,7 +216,6 @@ export async function GET(
       'status history'
     );
 
-    // Get documents
     const documents = await safe(
       () =>
         db
@@ -232,7 +234,6 @@ export async function GET(
       'documents'
     );
 
-    // Get denial code if present
     let denialCode = null;
     if (claim.denialCodeId) {
       const codeId: number = claim.denialCodeId;
@@ -283,37 +284,38 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    await ensureSaaSColumns();
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
     if (!UUID_RE.test(id)) {
       return NextResponse.json({ error: 'Invalid claim ID' }, { status: 400 });
     }
-    await ensureSaaSColumns();
 
     const body = await request.json();
 
     const [existingClaim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .limit(1);
 
     if (!existingClaim) {
       return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
     }
 
-    // Check access for frontline specialists
-    if (['ar_executive', 'billing_user'].includes(user.role) && existingClaim.assignedTo !== user.id) {
+    if (
+      ['ar_executive', 'billing_user'].includes(user.role) &&
+      existingClaim.assignedTo !== user.id
+    ) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
     const updateData: Partial<typeof claims.$inferInsert> = {};
 
-    // Practice association update
     if (body.practiceId !== undefined) {
       const nextPracticeId = body.practiceId ? String(body.practiceId).trim() : null;
       if (nextPracticeId) {
@@ -323,16 +325,20 @@ export async function PATCH(
         const [practiceExists] = await db
           .select({ id: practices.id })
           .from(practices)
-          .where(eq(practices.id, nextPracticeId))
+          .where(
+            and(eq(practices.id, nextPracticeId), eq(practices.organizationId, organizationId))
+          )
           .limit(1);
         if (!practiceExists) {
-          return NextResponse.json({ error: 'Selected practice not found' }, { status: 400 });
+          return NextResponse.json(
+            { error: 'Selected practice not found in your organization' },
+            { status: 400 }
+          );
         }
       }
       updateData.practiceId = nextPracticeId;
     }
 
-    // Update allowed fields
     if (body.patientName !== undefined) updateData.patientName = body.patientName || null;
     if (body.accountNumber !== undefined) updateData.accountNumber = body.accountNumber || null;
     if (body.dateOfService !== undefined) updateData.dateOfService = cleanDate(body.dateOfService);
@@ -342,23 +348,36 @@ export async function PATCH(
     if (body.provider !== undefined) updateData.provider = body.provider || null;
     if (body.insurance !== undefined) updateData.insurance = body.insurance || null;
     if (body.payer !== undefined) updateData.payer = body.payer || null;
-    if (body.billedAmount !== undefined) updateData.billedAmount = body.billedAmount !== '' && body.billedAmount !== null ? String(body.billedAmount) : null;
-    if (body.paidAmount !== undefined) updateData.paidAmount = body.paidAmount !== '' && body.paidAmount !== null ? String(body.paidAmount) : '0';
-    if (body.balance !== undefined) updateData.balance = body.balance !== '' && body.balance !== null ? String(body.balance) : null;
+    if (body.billedAmount !== undefined) {
+      updateData.billedAmount =
+        body.billedAmount !== '' && body.billedAmount !== null ? String(body.billedAmount) : null;
+    }
+    if (body.paidAmount !== undefined) {
+      updateData.paidAmount =
+        body.paidAmount !== '' && body.paidAmount !== null ? String(body.paidAmount) : '0';
+    }
+    if (body.balance !== undefined) {
+      updateData.balance =
+        body.balance !== '' && body.balance !== null ? String(body.balance) : null;
+    }
     if (body.priority !== undefined) updateData.priority = body.priority;
     if (body.subStatus !== undefined) updateData.subStatus = body.subStatus || null;
-    if (body.claimInsuranceStatus !== undefined) updateData.claimInsuranceStatus = body.claimInsuranceStatus || null;
+    if (body.claimInsuranceStatus !== undefined) {
+      updateData.claimInsuranceStatus = body.claimInsuranceStatus || null;
+    }
     if (body.followUpDate !== undefined) updateData.followUpDate = cleanDate(body.followUpDate);
     if (body.denialCodeId !== undefined) {
       const parsed = Number(body.denialCodeId);
       updateData.denialCodeId =
-        body.denialCodeId !== '' && body.denialCodeId !== null && Number.isInteger(parsed) && parsed > 0
+        body.denialCodeId !== '' &&
+        body.denialCodeId !== null &&
+        Number.isInteger(parsed) &&
+        parsed > 0
           ? parsed
           : null;
     }
     if (body.denialReason !== undefined) updateData.denialReason = body.denialReason || null;
 
-    // Status change + workflowStatus synchronization
     if (body.status && body.status !== existingClaim.status) {
       updateData.status = body.status;
       if (body.status === 'in_progress' && existingClaim.workflowStatus === 'unworked') {
@@ -377,6 +396,7 @@ export async function PATCH(
       }
 
       await db.insert(claimStatusHistory).values({
+        organizationId,
         claimId: id,
         previousStatus: existingClaim.status,
         newStatus: body.status,
@@ -385,7 +405,9 @@ export async function PATCH(
       });
 
       await createAuditLog({
+        organizationId,
         userId: user.id,
+        actorRole: ctx.orgRole,
         action: AUDIT_ACTIONS.CLAIM_STATUS_CHANGED,
         entityType: 'claim',
         entityId: id,
@@ -401,7 +423,7 @@ export async function PATCH(
     const [updatedClaim] = await db
       .update(claims)
       .set(updateData)
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .returning();
 
     let practice = null;
@@ -416,13 +438,15 @@ export async function PATCH(
           npi: practices.npi,
         })
         .from(practices)
-        .where(eq(practices.id, pId))
+        .where(and(eq(practices.id, pId), eq(practices.organizationId, organizationId)))
         .limit(1);
       practice = p ?? null;
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: AUDIT_ACTIONS.CLAIM_UPDATED,
       entityType: 'claim',
       entityId: id,

@@ -1,39 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, users, claimStatusHistory } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { claims, users, claimStatusHistory, claimNotes, organizationMembers } from '@/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { createNotification, NOTIFICATION_TEMPLATES } from '@/lib/notifications';
+import { ensureSaaSColumns } from '@/lib/db-schema';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    await ensureSaaSColumns();
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
+    const body = await request.json().catch(() => ({}));
+    const { notes, actionPerformed } = body;
 
     const [claim] = await db
       .select()
       .from(claims)
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .limit(1);
 
     if (!claim) {
       return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
     }
 
-    // Check if user is assigned to this claim
-    if (claim.assignedTo !== user.id) {
-      return NextResponse.json({ error: 'You can only submit claims assigned to you' }, { status: 403 });
+    if (
+      ['ar_executive', 'billing_user'].includes(user.role) &&
+      claim.assignedTo !== user.id
+    ) {
+      return NextResponse.json(
+        { error: 'You can only submit claims assigned to you' },
+        { status: 403 }
+      );
     }
 
-    // Check if claim is in a valid state for submission
     if (!['assigned', 'in_progress', 'rework_required'].includes(claim.status)) {
       return NextResponse.json(
         { error: 'Claim cannot be submitted in its current state' },
@@ -52,35 +60,68 @@ export async function POST(
         workedDate: claim.workedDate || now,
         updatedAt: now,
       })
-      .where(eq(claims.id, id))
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
       .returning();
 
-    // Create status history
     await db.insert(claimStatusHistory).values({
+      organizationId,
       claimId: id,
       previousStatus: claim.status,
       newStatus: 'submitted_for_review',
       changedBy: user.id,
-      reason: 'Submitted for review',
+      reason: notes || 'Submitted for review',
     });
 
-    // Notify team lead
-    if (user.teamLeadId) {
-      const template = NOTIFICATION_TEMPLATES.claimSubmitted(
-        claim.claimNumber,
-        `${user.firstName} ${user.lastName}`
-      );
-      await createNotification({
-        userId: user.teamLeadId,
-        type: template.type,
-        title: template.title,
-        message: template.message,
-        relatedClaimId: id,
+    if (notes) {
+      await db.insert(claimNotes).values({
+        organizationId,
+        claimId: id,
+        userId: user.id,
+        note: notes,
+        actionPerformed: actionPerformed || 'Submitted for Review',
       });
     }
 
+    const template = NOTIFICATION_TEMPLATES.claimSubmitted(
+      claim.claimNumber,
+      `${user.firstName} ${user.lastName}`
+    );
+
+    if (user.teamLeadId) {
+      await createNotification({
+        organizationId,
+        userId: user.teamLeadId,
+        relatedClaimId: id,
+        ...template,
+      });
+    } else {
+      const supervisors = await db
+        .select({ id: users.id })
+        .from(users)
+        .innerJoin(
+          organizationMembers,
+          and(
+            eq(organizationMembers.userId, users.id),
+            eq(organizationMembers.organizationId, organizationId),
+            eq(organizationMembers.isActive, true)
+          )
+        )
+        .where(and(eq(users.role, 'supervisor'), eq(users.isActive, true)));
+
+      for (const supervisor of supervisors) {
+        await createNotification({
+          organizationId,
+          userId: supervisor.id,
+          relatedClaimId: id,
+          ...template,
+        });
+      }
+    }
+
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: AUDIT_ACTIONS.CLAIM_SUBMITTED_FOR_REVIEW,
       entityType: 'claim',
       entityId: id,
@@ -93,9 +134,6 @@ export async function POST(
     return NextResponse.json({ claim: updatedClaim });
   } catch (error) {
     console.error('Submit claim error:', error);
-    return NextResponse.json(
-      { error: 'Failed to submit claim' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to submit claim' }, { status: 500 });
   }
 }

@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { and, eq } from 'drizzle-orm';
+import { isSupervisorOrAbove } from '@/lib/auth';
 import { canViewUser, getUserAuthorizedPracticeIds } from '@/lib/rbac';
 import { cleanUuid } from '@/lib/sanitize';
 import { analyzeClaimCoding } from '@/lib/coding/coding-checker';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const body = await request.json().catch(() => ({}));
     const claimId = cleanUuid(body.claimId);
@@ -24,17 +25,21 @@ export async function POST(request: NextRequest) {
     let dateOfService = body.dateOfService;
 
     if (claimId) {
-      const [claim] = await db.select().from(claims).where(eq(claims.id, claimId)).limit(1);
+      const [claim] = await db
+        .select()
+        .from(claims)
+        .where(and(eq(claims.id, claimId), eq(claims.organizationId, organizationId)))
+        .limit(1);
       if (!claim) {
         return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
       }
-      if (!isSupervisorOrAbove(user.role)) {
-        const authPractices = await getUserAuthorizedPracticeIds(user);
+      if (!ctx.isReadOnly && !isSupervisorOrAbove(user.role)) {
+        const authPractices = await getUserAuthorizedPracticeIds(user, organizationId);
         const allowedByPractice =
           authPractices === 'all' ||
           (claim.practiceId ? authPractices.includes(claim.practiceId) : false);
         const allowedByAssignee = claim.assignedTo
-          ? await canViewUser(user, claim.assignedTo)
+          ? await canViewUser(user, claim.assignedTo, organizationId)
           : false;
         if (!allowedByPractice && !allowedByAssignee) {
           return NextResponse.json({ error: 'Access denied' }, { status: 403 });

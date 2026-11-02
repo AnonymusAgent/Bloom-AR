@@ -1,18 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, users, practices, claimStatusHistory } from '@/db/schema';
+import { claims, users, practices, claimStatusHistory, organizationMembers } from '@/db/schema';
 import { eq, and, or, ilike, desc, asc, inArray, gte, lte, isNull, sql } from 'drizzle-orm';
-import { getCurrentUser, canAssignClaims } from '@/lib/auth';
+import { canAssignClaims } from '@/lib/auth';
 import { ensureSaaSColumns } from '@/lib/db-schema';
 import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
+import { getEntitlements } from '@/lib/saas';
+import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 
 export async function GET(request: NextRequest) {
   try {
     await ensureSaaSColumns();
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const searchParams = request.nextUrl.searchParams;
     const search = searchParams.get('search');
@@ -27,19 +30,29 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(searchParams.get('page'));
     const limit = cleanLimit(searchParams.get('limit'), 20, 200);
 
-    const conditions = [];
+    // Mandatory tenant boundary filter
+    const conditions = [eq(claims.organizationId, organizationId)];
 
-    // Role-based filtering using RBAC
-    if (['ar_executive', 'billing_user'].includes(user.role)) {
+    // Role-based filtering inside the active organization
+    if (!ctx.isReadOnly && ['ar_executive', 'billing_user'].includes(user.role)) {
       conditions.push(eq(claims.assignedTo, user.id));
-    } else if (['team_lead', 'senior_lead'].includes(user.role)) {
-      const teamMembers = await db.select({ id: users.id }).from(users).where(eq(users.teamLeadId, user.id));
-      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.id)];
-      conditions.push(or(inArray(claims.assignedTo, teamMemberIds), eq(claims.assignedBy, user.id)));
+    } else if (!ctx.isReadOnly && ['team_lead', 'senior_lead'].includes(user.role)) {
+      const teamMembers = await db
+        .select({ userId: organizationMembers.userId })
+        .from(organizationMembers)
+        .where(
+          and(
+            eq(organizationMembers.organizationId, organizationId),
+            eq(organizationMembers.teamLeadId, user.id),
+            eq(organizationMembers.isActive, true)
+          )
+        );
+      const teamMemberIds = [user.id, ...teamMembers.map((m) => m.userId)];
+      conditions.push(
+        or(inArray(claims.assignedTo, teamMemberIds), eq(claims.assignedBy, user.id))!
+      );
     }
-    // Admins, Supervisors, Managers see all claims
 
-    // Practice filter
     const rawPracticeId = searchParams.get('practiceId');
     if (rawPracticeId === 'unassigned') {
       conditions.push(isNull(claims.practiceId));
@@ -48,7 +61,6 @@ export async function GET(request: NextRequest) {
       if (pid) conditions.push(eq(claims.practiceId, pid));
     }
 
-    // Search filter (claim #, patient, account #, payer/insurance, provider)
     if (search) {
       conditions.push(
         or(
@@ -58,24 +70,21 @@ export async function GET(request: NextRequest) {
           ilike(claims.insurance, `%${search}%`),
           ilike(claims.payer, `%${search}%`),
           ilike(claims.provider, `%${search}%`)
-        )
+        )!
       );
     }
 
-    // Status filter
     if (status) {
       const statuses = status.split(',') as Array<(typeof claims.status.enumValues)[number]>;
       conditions.push(inArray(claims.status, statuses));
     }
 
-    // Workflow status filter
     const workflowStatus = searchParams.get('workflowStatus');
     if (workflowStatus) {
       const wfStatuses = workflowStatus.split(',');
       conditions.push(inArray(claims.workflowStatus, wfStatuses));
     }
 
-    // Insurance status filter
     const insuranceStatus = searchParams.get('insuranceStatus');
     if (insuranceStatus === 'partial_paid') {
       conditions.push(
@@ -95,7 +104,6 @@ export async function GET(request: NextRequest) {
       conditions.push(eq(claims.claimInsuranceStatus, insuranceStatus));
     }
 
-    // Assigned to filter
     if (assignedTo === 'unassigned') {
       conditions.push(isNull(claims.assignedTo));
     } else if (assignedTo) {
@@ -103,17 +111,14 @@ export async function GET(request: NextRequest) {
       if (aid) conditions.push(eq(claims.assignedTo, aid));
     }
 
-    // Insurance filter
     if (insurance) {
       conditions.push(ilike(claims.insurance, `%${insurance}%`));
     }
 
-    // Provider filter
     if (provider) {
       conditions.push(ilike(claims.provider, `%${provider}%`));
     }
 
-    // Date range filter
     if (dateFrom) {
       conditions.push(gte(claims.dateOfService, dateFrom));
     }
@@ -121,9 +126,8 @@ export async function GET(request: NextRequest) {
       conditions.push(lte(claims.dateOfService, dateTo));
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const whereClause = and(...conditions);
 
-    // Get total count
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(claims)
@@ -182,30 +186,34 @@ export async function GET(request: NextRequest) {
       .limit(limit)
       .offset((page - 1) * limit);
 
-    // Batch-resolve user names and practice details in parallel (zero N+1)
     const userIds = Array.from(
       new Set(
-        result.flatMap((c) => [c.assignedTo, c.approvedBy, c.workedBy].filter((id): id is string => Boolean(id)))
+        result.flatMap((c) =>
+          [c.assignedTo, c.approvedBy, c.workedBy].filter((id): id is string => Boolean(id))
+        )
       )
     );
     const practiceIds = Array.from(
       new Set(result.map((c) => c.practiceId).filter((id): id is string => Boolean(id)))
     );
 
-    const [nameRows, practiceRows] = await Promise.all([
+    const nameRows =
       userIds.length > 0
-        ? db
+        ? await db
             .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
             .from(users)
             .where(inArray(users.id, userIds))
-        : Promise.resolve([]),
+        : [];
+
+    const practiceRows =
       practiceIds.length > 0
-        ? db
+        ? await db
             .select({ id: practices.id, name: practices.name, code: practices.code })
             .from(practices)
-            .where(inArray(practices.id, practiceIds))
-        : Promise.resolve([]),
-    ]);
+            .where(
+              and(eq(practices.organizationId, organizationId), inArray(practices.id, practiceIds))
+            )
+        : [];
 
     const namesById = new Map(nameRows.map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
     const practicesById = new Map(practiceRows.map((p) => [p.id, p]));
@@ -240,9 +248,24 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     await ensureSaaSColumns();
-    const user = await getCurrentUser();
-    if (!user || !canAssignClaims(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    if (!canAssignClaims(user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
+    }
+
+    const ent = await getEntitlements(organizationId);
+    if (ent && !ent.canCreateClaim) {
+      return NextResponse.json(
+        {
+          error: `Monthly claim volume limit (${ent.usage.claimsLimit}) reached for your plan. Upgrade in Billing Settings.`,
+          code: 'CLAIM_LIMIT_REACHED',
+        },
+        { status: 402 }
+      );
     }
 
     const body = await request.json();
@@ -262,8 +285,12 @@ export async function POST(request: NextRequest) {
     } = body;
     const dateOfService = cleanDate(body.dateOfService);
     const practiceId = cleanUuid(body.practiceId);
-    const billedAmount = body.billedAmount !== undefined && body.billedAmount !== '' ? String(body.billedAmount) : null;
-    const paidAmount = body.paidAmount !== undefined && body.paidAmount !== '' ? String(body.paidAmount) : '0';
+    const billedAmount =
+      body.billedAmount !== undefined && body.billedAmount !== ''
+        ? String(body.billedAmount)
+        : null;
+    const paidAmount =
+      body.paidAmount !== undefined && body.paidAmount !== '' ? String(body.paidAmount) : '0';
     const balance =
       body.balance !== undefined && body.balance !== ''
         ? String(body.balance)
@@ -279,10 +306,13 @@ export async function POST(request: NextRequest) {
       const [practice] = await db
         .select({ id: practices.id })
         .from(practices)
-        .where(eq(practices.id, practiceId))
+        .where(and(eq(practices.id, practiceId), eq(practices.organizationId, organizationId)))
         .limit(1);
       if (!practice) {
-        return NextResponse.json({ error: 'Selected practice not found' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'Selected practice not found in your organization' },
+          { status: 400 }
+        );
       }
     }
 
@@ -303,6 +333,7 @@ export async function POST(request: NextRequest) {
     const [newClaim] = await db
       .insert(claims)
       .values({
+        organizationId,
         claimNumber,
         accountNumber: accountNumber || null,
         patientName: patientName || null,
@@ -325,10 +356,21 @@ export async function POST(request: NextRequest) {
       .returning();
 
     await db.insert(claimStatusHistory).values({
+      organizationId,
       claimId: newClaim.id,
       newStatus: initialStatus,
       changedBy: user.id,
       reason: 'Claim created',
+    });
+
+    await createAuditLog({
+      organizationId,
+      userId: user.id,
+      actorRole: ctx.orgRole,
+      action: AUDIT_ACTIONS.CLAIM_CREATED,
+      entityType: 'claim',
+      entityId: newClaim.id,
+      newValue: { claimNumber, status: initialStatus },
     });
 
     return NextResponse.json({ claim: newClaim });

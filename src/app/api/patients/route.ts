@@ -1,33 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { patients, organizationMembers } from '@/db/schema';
-import { eq, and, or, ilike, desc, sql, inArray, isNull } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
+import { patients } from '@/db/schema';
+import { eq, and, or, ilike, desc, sql } from 'drizzle-orm';
 import { createAuditLog } from '@/lib/audit';
 import { cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const sp = request.nextUrl.searchParams;
     const search = sp.get('search')?.trim();
     const page = cleanPage(sp.get('page'));
     const limit = cleanLimit(sp.get('limit'), 20, 100);
 
-    const memberships = await db
-      .select({ organizationId: organizationMembers.organizationId })
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, user.id));
-    const orgIds = memberships.map((m) => m.organizationId);
-
-    const conditions = [eq(patients.isActive, true)];
-    if (orgIds.length > 0) {
-      conditions.push(inArray(patients.organizationId, orgIds));
-    } else {
-      conditions.push(isNull(patients.organizationId));
-    }
+    const conditions = [
+      eq(patients.organizationId, ctx.organizationId),
+      eq(patients.isActive, true),
+    ];
 
     if (search) {
       conditions.push(
@@ -45,6 +38,7 @@ export async function GET(request: NextRequest) {
       .select({ count: sql<number>`count(*)::int` })
       .from(patients)
       .where(and(...conditions));
+
     const rows = await db
       .select()
       .from(patients)
@@ -65,8 +59,9 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const body = await request.json();
     const {
@@ -87,20 +82,21 @@ export async function POST(request: NextRequest) {
     } = body;
 
     if (!firstName || !lastName) {
-      return NextResponse.json({ error: 'First and last name are required' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'First and last name are required' },
+        { status: 400 }
+      );
     }
 
     const dateOfBirth = cleanDate(body.dateOfBirth);
 
-    const memberships = await db
-      .select({ organizationId: organizationMembers.organizationId })
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, user.id));
-    const primaryOrgId = memberships[0]?.organizationId || null;
-
-    const dupeConditions = [ilike(patients.firstName, firstName), ilike(patients.lastName, lastName)];
+    const dupeConditions = [
+      eq(patients.organizationId, ctx.organizationId),
+      ilike(patients.firstName, firstName),
+      ilike(patients.lastName, lastName),
+    ];
     if (dateOfBirth) dupeConditions.push(eq(patients.dateOfBirth, dateOfBirth));
-    if (primaryOrgId) dupeConditions.push(eq(patients.organizationId, primaryOrgId));
+
     const [dupe] = await db
       .select({ id: patients.id })
       .from(patients)
@@ -110,6 +106,7 @@ export async function POST(request: NextRequest) {
     const [patient] = await db
       .insert(patients)
       .values({
+        organizationId: ctx.organizationId,
         firstName: String(firstName).trim(),
         lastName: String(lastName).trim(),
         middleName: middleName ? String(middleName).trim() : null,
@@ -125,12 +122,13 @@ export async function POST(request: NextRequest) {
         groupNumber: groupNumber || null,
         subscriberName: subscriberName || null,
         relationshipToSubscriber: relationshipToSubscriber || null,
-        organizationId: primaryOrgId,
       })
       .returning();
 
     await createAuditLog({
-      userId: user.id,
+      organizationId: ctx.organizationId,
+      userId: ctx.user.id,
+      actorRole: ctx.orgRole,
       action: 'patient_created',
       entityType: 'patient',
       entityId: patient.id,
@@ -139,7 +137,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       patient,
-      duplicateWarning: dupe ? 'A similar patient record already exists. Please verify.' : null,
+      duplicateWarning: dupe
+        ? 'A similar patient record already exists in your organization. Please verify.'
+        : null,
     });
   } catch (error) {
     console.error('Create patient error:', error);

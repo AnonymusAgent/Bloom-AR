@@ -1,58 +1,100 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, claimDocuments } from '@/db/schema';
+import { claimDocuments } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { canAccessClaim } from '@/lib/rbac';
+import { cleanUuid } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string; docId: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id, docId } = await params;
-    if (!UUID_RE.test(id) || !UUID_RE.test(docId)) {
+    const claimId = cleanUuid(id);
+    const documentId = cleanUuid(docId);
+    if (!claimId || !documentId) {
       return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
     }
 
-    const [claim] = await db.select().from(claims).where(eq(claims.id, id)).limit(1);
-    if (!claim) {
-      return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
-    }
-
-    if (['ar_executive', 'billing_user'].includes(user.role) && claim.assignedTo !== user.id) {
+    const hasAccess = await canAccessClaim(user, claimId, organizationId);
+    if (!hasAccess) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
 
     const [doc] = await db
       .select()
       .from(claimDocuments)
-      .where(and(eq(claimDocuments.id, docId), eq(claimDocuments.claimId, id)))
+      .where(
+        and(
+          eq(claimDocuments.id, documentId),
+          eq(claimDocuments.claimId, claimId),
+          eq(claimDocuments.organizationId, organizationId)
+        )
+      )
       .limit(1);
 
-    if (!doc) {
+    if (!doc || !doc.fileData) {
       return NextResponse.json({ error: 'Document not found' }, { status: 404 });
     }
 
     const buffer = Buffer.from(doc.fileData, 'base64');
     const safeName = doc.fileName.replace(/["\r\n]/g, '_');
-    const inline = request.nextUrl.searchParams.get('inline') === '1';
 
     return new NextResponse(buffer, {
       headers: {
         'Content-Type': doc.mimeType || 'application/octet-stream',
-        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${safeName}"`,
-        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': `attachment; filename="${safeName}"`,
+        'Content-Length': String(buffer.length),
       },
     });
   } catch (error) {
-    console.error('Download claim document error:', error);
+    console.error('Claim document download error:', error);
     return NextResponse.json({ error: 'Failed to download document' }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string; docId: string }> }
+) {
+  try {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    const { id, docId } = await params;
+    const claimId = cleanUuid(id);
+    const documentId = cleanUuid(docId);
+    if (!claimId || !documentId) {
+      return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    }
+
+    const hasAccess = await canAccessClaim(user, claimId, organizationId);
+    if (!hasAccess) {
+      return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+    }
+
+    await db
+      .delete(claimDocuments)
+      .where(
+        and(
+          eq(claimDocuments.id, documentId),
+          eq(claimDocuments.claimId, claimId),
+          eq(claimDocuments.organizationId, organizationId)
+        )
+      );
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Claim document delete error:', error);
+    return NextResponse.json({ error: 'Failed to delete document' }, { status: 500 });
   }
 }

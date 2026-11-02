@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCurrentUser, canUploadFiles } from '@/lib/auth';
+import { canUploadFiles } from '@/lib/auth';
 import { inspectWorkbook, CANONICAL_FIELDS } from '@/lib/file-parser';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { user } = auth.ctx;
 
     if (!canUploadFiles(user.role)) {
       return NextResponse.json(
@@ -40,7 +40,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 25MB max size limit check
     if (file.size > 25 * 1024 * 1024) {
       return NextResponse.json(
         {
@@ -60,18 +59,15 @@ export async function POST(request: NextRequest) {
         inspection,
         canonicalFields: CANONICAL_FIELDS,
       });
-    } catch (parseError: any) {
+    } catch (parseError: unknown) {
+      const msg =
+        parseError instanceof Error
+          ? parseError.message
+          : 'The Excel file could not be read. Please check that the file is not password-protected or corrupted and try again.';
       console.error('Workbook inspection error:', parseError);
-      return NextResponse.json(
-        {
-          error:
-            parseError.message ||
-            'The Excel file could not be read. Please check that the file is not password-protected or corrupted and try again.',
-        },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: msg }, { status: 400 });
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Inspect API error:', error);
     return NextResponse.json(
       { error: 'An unexpected error occurred while analyzing the file.' },

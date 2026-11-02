@@ -2,13 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { auditLogs, users } from '@/db/schema';
 import { eq, and, gte, lte, desc, ilike, or, sql } from 'drizzle-orm';
-import { getCurrentUser, hasPermission } from '@/lib/auth';
+import { hasPermission } from '@/lib/auth';
 import { cleanUuid, cleanPage, cleanLimit, parseEndOfDay } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !hasPermission(user.role, 'view_audit_logs')) {
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+
+    if (!hasPermission(ctx.user.role, 'view_audit_logs')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -22,7 +26,8 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(searchParams.get('page'));
     const limit = cleanLimit(searchParams.get('limit'), 50, 200);
 
-    const conditions = [];
+    // Strictly isolate audit logs to the active organization workspace!
+    const conditions = [eq(auditLogs.organizationId, ctx.organizationId)];
 
     if (search) {
       conditions.push(
@@ -30,7 +35,7 @@ export async function GET(request: NextRequest) {
           ilike(auditLogs.action, `%${search}%`),
           ilike(auditLogs.entityType, `%${search}%`),
           ilike(auditLogs.entityId, `%${search}%`)
-        )
+        )!
       );
     }
 
@@ -54,19 +59,18 @@ export async function GET(request: NextRequest) {
       conditions.push(lte(auditLogs.createdAt, parseEndOfDay(dateTo)));
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const whereClause = and(...conditions);
 
-    // Get total count
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(auditLogs)
       .where(whereClause);
 
-    // Get logs with user info
     const logs = await db
       .select({
         id: auditLogs.id,
         userId: auditLogs.userId,
+        actorRole: auditLogs.actorRole,
         action: auditLogs.action,
         entityType: auditLogs.entityType,
         entityId: auditLogs.entityId,
@@ -87,11 +91,12 @@ export async function GET(request: NextRequest) {
       .offset((page - 1) * limit);
 
     return NextResponse.json({
-      auditLogs: logs.map(log => ({
+      auditLogs: logs.map((log) => ({
         ...log,
-        userName: log.userName && log.userLastName 
-          ? `${log.userName} ${log.userLastName}` 
-          : 'System',
+        userName:
+          log.userName && log.userLastName
+            ? `${log.userName} ${log.userLastName}`
+            : 'System',
       })),
       pagination: {
         page,
@@ -102,9 +107,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Get audit logs error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch audit logs' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch audit logs' }, { status: 500 });
   }
 }

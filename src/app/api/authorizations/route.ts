@@ -2,16 +2,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { authorizations, users } from '@/db/schema';
 import { eq, and, or, ilike, desc, sql, inArray } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
-import { getUserAuthorizedUserIds } from '@/lib/rbac';
+import {
+  getUserAuthorizedUserIds,
+  verifyClaimInOrg,
+  verifyPracticeInOrg,
+  verifyUserInOrg,
+} from '@/lib/rbac';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
 import { cleanUuid, cleanDate, cleanPage, cleanLimit } from '@/lib/sanitize';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const sp = request.nextUrl.searchParams;
     const search = sp.get('search')?.trim();
@@ -20,14 +27,17 @@ export async function GET(request: NextRequest) {
     const page = cleanPage(sp.get('page'));
     const limit = cleanLimit(sp.get('limit'), 20, 100);
 
-    const authorizedUsers = await getUserAuthorizedUserIds(user);
-    const scopeCondition =
-      authorizedUsers === 'all'
-        ? undefined
-        : inArray(authorizations.assignedTo, authorizedUsers);
+    const baseConditions = [eq(authorizations.organizationId, organizationId)];
+    if (!ctx.isReadOnly && !['administrator', 'supervisor', 'manager'].includes(user.role)) {
+      const authorizedUsers = await getUserAuthorizedUserIds(user, organizationId);
+      if (authorizedUsers.length > 0) {
+        baseConditions.push(inArray(authorizations.assignedTo, authorizedUsers));
+      } else {
+        baseConditions.push(eq(authorizations.assignedTo, user.id));
+      }
+    }
 
-    const conditions = [];
-    if (scopeCondition) conditions.push(scopeCondition);
+    const conditions = [...baseConditions];
     if (search) {
       conditions.push(
         or(
@@ -39,14 +49,17 @@ export async function GET(request: NextRequest) {
     }
     if (status) {
       conditions.push(
-        eq(authorizations.status, status as 'pending' | 'in_progress' | 'completed' | 'denied' | 'expired')
+        eq(
+          authorizations.status,
+          status as 'pending' | 'in_progress' | 'completed' | 'denied' | 'expired'
+        )
       );
     }
     if (assignedTo) {
       conditions.push(eq(authorizations.assignedTo, assignedTo));
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const whereClause = and(...conditions);
 
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -61,20 +74,22 @@ export async function GET(request: NextRequest) {
       .limit(limit)
       .offset((page - 1) * limit);
 
-    const withNames = await Promise.all(
-      rows.map(async (a) => {
-        let assigneeName = null;
-        if (a.assignedTo) {
-          const [u] = await db
-            .select({ firstName: users.firstName, lastName: users.lastName })
-            .from(users)
-            .where(eq(users.id, a.assignedTo))
-            .limit(1);
-          assigneeName = u ? `${u.firstName} ${u.lastName}` : null;
-        }
-        return { ...a, assigneeName };
-      })
+    const assigneeIds = Array.from(
+      new Set(rows.map((a) => a.assignedTo).filter((id): id is string => Boolean(id)))
     );
+    const userRows =
+      assigneeIds.length > 0
+        ? await db
+            .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+            .from(users)
+            .where(inArray(users.id, assigneeIds))
+        : [];
+    const namesMap = new Map(userRows.map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
+
+    const withNames = rows.map((a) => ({
+      ...a,
+      assigneeName: a.assignedTo ? namesMap.get(a.assignedTo) || null : null,
+    }));
 
     const stats = await db
       .select({
@@ -82,7 +97,7 @@ export async function GET(request: NextRequest) {
         count: sql<number>`count(*)::int`,
       })
       .from(authorizations)
-      .where(scopeCondition)
+      .where(and(...baseConditions))
       .groupBy(authorizations.status);
 
     const statusMap: Record<string, number> = {};
@@ -108,8 +123,10 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const body = await request.json();
     const {
@@ -123,7 +140,10 @@ export async function POST(request: NextRequest) {
     } = body;
 
     if (!patientName || !insuranceName) {
-      return NextResponse.json({ error: 'Patient name and insurance name are required' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Patient name and insurance name are required' },
+        { status: 400 }
+      );
     }
 
     const claimId = cleanUuid(body.claimId);
@@ -132,9 +152,26 @@ export async function POST(request: NextRequest) {
     const expirationDate = cleanDate(body.expirationDate);
     const dateObtained = cleanDate(body.dateObtained);
 
+    if (claimId && !(await verifyClaimInOrg(claimId, organizationId))) {
+      return NextResponse.json({ error: 'Claim not found in your organization' }, { status: 400 });
+    }
+    if (practiceId && !(await verifyPracticeInOrg(practiceId, organizationId))) {
+      return NextResponse.json(
+        { error: 'Practice not found in your organization' },
+        { status: 400 }
+      );
+    }
+    if (assignedTo && !(await verifyUserInOrg(assignedTo, organizationId))) {
+      return NextResponse.json(
+        { error: 'Assignee not found in your organization' },
+        { status: 400 }
+      );
+    }
+
     const [newAuth] = await db
       .insert(authorizations)
       .values({
+        organizationId,
         patientName: String(patientName).trim(),
         insuranceName: String(insuranceName).trim(),
         authNumber: authNumber ? String(authNumber).trim() : null,
@@ -155,6 +192,7 @@ export async function POST(request: NextRequest) {
 
     if (assignedTo) {
       await createNotification({
+        organizationId,
         userId: assignedTo,
         type: 'task_assigned',
         title: 'New Authorization Assigned',
@@ -163,7 +201,9 @@ export async function POST(request: NextRequest) {
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'authorization_created',
       entityType: 'authorization',
       entityId: newAuth.id,

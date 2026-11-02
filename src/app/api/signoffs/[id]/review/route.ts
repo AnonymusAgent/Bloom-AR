@@ -1,18 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { signoffs, billingTasks, claims, taskStatusHistory, claimStatusHistory } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser, canReviewSignoffs } from '@/lib/auth';
+import { and, eq } from 'drizzle-orm';
+import { canReviewSignoffs } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !canReviewSignoffs(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    if (!canReviewSignoffs(user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -29,7 +34,7 @@ export async function POST(
     const [signoff] = await db
       .select()
       .from(signoffs)
-      .where(eq(signoffs.id, id))
+      .where(and(eq(signoffs.id, id), eq(signoffs.organizationId, organizationId)))
       .limit(1);
 
     if (!signoff) {
@@ -45,7 +50,10 @@ export async function POST(
 
     if (signoff.submittedBy === user.id && user.role !== 'administrator') {
       return NextResponse.json(
-        { error: 'Self-approval is not permitted. Another lead or supervisor must review this sign-off.' },
+        {
+          error:
+            'Self-approval is not permitted. Another lead or supervisor must review this sign-off.',
+        },
         { status: 403 }
       );
     }
@@ -60,26 +68,36 @@ export async function POST(
         reviewedAt: new Date(),
         reviewNotes,
       })
-      .where(eq(signoffs.id, id))
+      .where(and(eq(signoffs.id, id), eq(signoffs.organizationId, organizationId)))
       .returning();
 
-    // Update associated entity status
     if (signoff.taskId) {
       const newTaskStatus = action === 'approve' ? 'signed_off' : 'in_progress';
-      
+
       const [task] = await db
         .select()
         .from(billingTasks)
-        .where(eq(billingTasks.id, signoff.taskId))
+        .where(
+          and(
+            eq(billingTasks.id, signoff.taskId),
+            eq(billingTasks.organizationId, organizationId)
+          )
+        )
         .limit(1);
 
       if (task) {
         await db
           .update(billingTasks)
           .set({ status: newTaskStatus, updatedAt: new Date() })
-          .where(eq(billingTasks.id, signoff.taskId));
+          .where(
+            and(
+              eq(billingTasks.id, signoff.taskId),
+              eq(billingTasks.organizationId, organizationId)
+            )
+          );
 
         await db.insert(taskStatusHistory).values({
+          organizationId,
           taskId: signoff.taskId,
           previousStatus: task.status,
           newStatus: newTaskStatus,
@@ -96,7 +114,7 @@ export async function POST(
       const [claim] = await db
         .select()
         .from(claims)
-        .where(eq(claims.id, signoff.claimId))
+        .where(and(eq(claims.id, signoff.claimId), eq(claims.organizationId, organizationId)))
         .limit(1);
 
       if (claim) {
@@ -107,12 +125,16 @@ export async function POST(
             workflowStatus: newWorkflowStatus,
             ...(action === 'approve'
               ? { approvedBy: user.id, approvedAt: new Date() }
-              : { reworkReason: reviewNotes || 'Sign-off rejected', reworkCount: (claim.reworkCount || 0) + 1 }),
+              : {
+                  reworkReason: reviewNotes || 'Sign-off rejected',
+                  reworkCount: (claim.reworkCount || 0) + 1,
+                }),
             updatedAt: new Date(),
           })
-          .where(eq(claims.id, signoff.claimId));
+          .where(and(eq(claims.id, signoff.claimId), eq(claims.organizationId, organizationId)));
 
         await db.insert(claimStatusHistory).values({
+          organizationId,
           claimId: signoff.claimId,
           previousStatus: claim.status,
           newStatus: newClaimStatus,
@@ -122,9 +144,9 @@ export async function POST(
       }
     }
 
-    // Notify submitter
     const notificationType = action === 'approve' ? 'signoff_approved' : 'signoff_rejected';
     await createNotification({
+      organizationId,
       userId: signoff.submittedBy,
       type: notificationType,
       title: `Sign-off ${action === 'approve' ? 'Approved' : 'Rejected'}`,
@@ -132,7 +154,9 @@ export async function POST(
     });
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: `signoff_${action}d`,
       entityType: 'signoff',
       entityId: id,
@@ -145,9 +169,6 @@ export async function POST(
     return NextResponse.json({ signoff: updatedSignoff });
   } catch (error) {
     console.error('Review signoff error:', error);
-    return NextResponse.json(
-      { error: 'Failed to review signoff' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to review signoff' }, { status: 500 });
   }
 }

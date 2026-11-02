@@ -2,25 +2,32 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { authDocuments, authorizations } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { getCurrentUser } from '@/lib/auth';
 import { canViewUser } from '@/lib/rbac';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string; docId: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const authRes = await requireTenantContext();
+    if (!authRes.ok) return authRes.response;
+    const { ctx } = authRes;
+    const { user, organizationId } = ctx;
     const { id, docId } = await params;
 
-    const [auth] = await db.select().from(authorizations).where(eq(authorizations.id, id)).limit(1);
+    const [auth] = await db
+      .select()
+      .from(authorizations)
+      .where(and(eq(authorizations.id, id), eq(authorizations.organizationId, organizationId)))
+      .limit(1);
     if (!auth) return NextResponse.json({ error: 'Authorization not found' }, { status: 404 });
 
     if (
+      !ctx.isReadOnly &&
       !['administrator', 'supervisor', 'manager'].includes(user.role) &&
       auth.assignedBy !== user.id &&
-      (!auth.assignedTo || !(await canViewUser(user, auth.assignedTo)))
+      (!auth.assignedTo || !(await canViewUser(user, auth.assignedTo, organizationId)))
     ) {
       return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     }
@@ -28,7 +35,13 @@ export async function GET(
     const [doc] = await db
       .select()
       .from(authDocuments)
-      .where(and(eq(authDocuments.id, docId), eq(authDocuments.authId, id)))
+      .where(
+        and(
+          eq(authDocuments.id, docId),
+          eq(authDocuments.authId, id),
+          eq(authDocuments.organizationId, organizationId)
+        )
+      )
       .limit(1);
 
     if (!doc) return NextResponse.json({ error: 'Document not found' }, { status: 404 });

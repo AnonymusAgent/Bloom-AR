@@ -1,18 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { practices, userPracticeAssignments, users } from '@/db/schema';
+import { practices, userPracticeAssignments, users, organizationMembers } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { getCurrentUser, canAssignPractices } from '@/lib/auth';
+import { canAssignPractices } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
+import { requireTenantContext, mapOrgRoleToOperationalRole } from '@/lib/tenant-context';
+import { verifyUserInOrg } from '@/lib/rbac';
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !canAssignPractices(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+
+    if (!canAssignPractices(ctx.user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -26,33 +31,37 @@ export async function POST(
     const [practice] = await db
       .select()
       .from(practices)
-      .where(eq(practices.id, id))
+      .where(and(eq(practices.id, id), eq(practices.organizationId, ctx.organizationId)))
       .limit(1);
 
     if (!practice) {
       return NextResponse.json({ error: 'Practice not found' }, { status: 404 });
     }
 
-    const [assignee] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    if (!assignee) {
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    const inOrg = await verifyUserInOrg(userId, ctx.organizationId);
+    if (!inOrg) {
+      return NextResponse.json(
+        { error: 'User does not belong to your organization' },
+        { status: 404 }
+      );
     }
 
     const [existingAssignment] = await db
       .select()
       .from(userPracticeAssignments)
-      .where(and(eq(userPracticeAssignments.practiceId, id), eq(userPracticeAssignments.userId, userId)))
+      .where(
+        and(
+          eq(userPracticeAssignments.practiceId, id),
+          eq(userPracticeAssignments.userId, userId)
+        )
+      )
       .limit(1);
 
     if (existingAssignment) {
       const [updatedAssignment] = await db
         .update(userPracticeAssignments)
         .set({
+          organizationId: ctx.organizationId,
           responsibilities: responsibilities || existingAssignment.responsibilities || [],
           isPrimary: isPrimary ?? existingAssignment.isPrimary,
         })
@@ -64,17 +73,18 @@ export async function POST(
     const [assignment] = await db
       .insert(userPracticeAssignments)
       .values({
+        organizationId: ctx.organizationId,
         userId,
         practiceId: id,
-        assignedBy: user.id,
+        assignedBy: ctx.user.id,
         responsibilities: responsibilities || [],
         isPrimary: isPrimary || false,
         startDate: new Date().toISOString().split('T')[0],
       })
       .returning();
 
-    // Create notification
     await createNotification({
+      organizationId: ctx.organizationId,
       userId,
       type: 'practice_assigned',
       title: 'New Practice Assigned',
@@ -82,7 +92,9 @@ export async function POST(
     });
 
     await createAuditLog({
-      userId: user.id,
+      organizationId: ctx.organizationId,
+      userId: ctx.user.id,
+      actorRole: ctx.orgRole,
       action: 'practice_assigned',
       entityType: 'userPracticeAssignment',
       entityId: assignment.id,
@@ -94,26 +106,32 @@ export async function POST(
     return NextResponse.json({ assignment });
   } catch (error) {
     console.error('Assign practice error:', error);
-    return NextResponse.json(
-      { error: 'Failed to assign practice' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to assign practice' }, { status: 500 });
   }
 }
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const { id } = await params;
 
-    const assignments = await db
+    const [practice] = await db
+      .select({ id: practices.id })
+      .from(practices)
+      .where(and(eq(practices.id, id), eq(practices.organizationId, ctx.organizationId)))
+      .limit(1);
+
+    if (!practice) {
+      return NextResponse.json({ error: 'Practice not found' }, { status: 404 });
+    }
+
+    const rows = await db
       .select({
         id: userPracticeAssignments.id,
         userId: userPracticeAssignments.userId,
@@ -124,18 +142,37 @@ export async function GET(
         firstName: users.firstName,
         lastName: users.lastName,
         email: users.email,
-        role: users.role,
+        orgRole: organizationMembers.orgRole,
+        operationalRole: organizationMembers.operationalRole,
       })
       .from(userPracticeAssignments)
-      .leftJoin(users, eq(userPracticeAssignments.userId, users.id))
+      .innerJoin(
+        organizationMembers,
+        and(
+          eq(organizationMembers.userId, userPracticeAssignments.userId),
+          eq(organizationMembers.organizationId, ctx.organizationId),
+          eq(organizationMembers.isActive, true)
+        )
+      )
+      .innerJoin(users, eq(userPracticeAssignments.userId, users.id))
       .where(eq(userPracticeAssignments.practiceId, id));
+
+    const assignments = rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      responsibilities: r.responsibilities,
+      isPrimary: r.isPrimary,
+      startDate: r.startDate,
+      createdAt: r.createdAt,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      email: r.email,
+      role: mapOrgRoleToOperationalRole(r.orgRole, r.operationalRole),
+    }));
 
     return NextResponse.json({ assignments });
   } catch (error) {
     console.error('Get practice assignments error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch assignments' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch assignments' }, { status: 500 });
   }
 }

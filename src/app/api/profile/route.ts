@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { users, practices, userPracticeAssignments } from '@/db/schema';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import {
   getCurrentUser,
   UserRole,
@@ -17,13 +17,17 @@ import {
   isSupervisorOrAbove,
 } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
+import { resolveTenantContext } from '@/lib/tenant-context';
 import {
   resolveSessionSecurity,
   resolveInactivityTimeout,
   resolveWarnBeforeLock,
 } from '@/lib/session-security';
 
-const PERMISSION_DESCRIPTIONS: Record<string, { label: string; description: string; category: string }> = {
+const PERMISSION_DESCRIPTIONS: Record<
+  string,
+  { label: string; description: string; category: string }
+> = {
   upload_files: {
     label: 'Upload AR Batches',
     description: 'Upload and parse AR Excel spreadsheets, CSVs, and remittance files',
@@ -157,29 +161,38 @@ function sanitizePreferences(
   existing: Record<string, unknown> | null
 ): Record<string, unknown> {
   const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
-  const next = incoming && typeof incoming === 'object' && !Array.isArray(incoming)
-    ? (incoming as Record<string, unknown>)
-    : {};
+  const next =
+    incoming && typeof incoming === 'object' && !Array.isArray(incoming)
+      ? (incoming as Record<string, unknown>)
+      : {};
 
   const existingNotifs =
-    base.notifications && typeof base.notifications === 'object' && !Array.isArray(base.notifications)
+    base.notifications &&
+    typeof base.notifications === 'object' &&
+    !Array.isArray(base.notifications)
       ? (base.notifications as Record<string, unknown>)
       : {};
 
   const incomingNotifs =
-    next.notifications && typeof next.notifications === 'object' && !Array.isArray(next.notifications)
+    next.notifications &&
+    typeof next.notifications === 'object' &&
+    !Array.isArray(next.notifications)
       ? (next.notifications as Record<string, unknown>)
       : {};
 
   const mergedNotifs = { ...existingNotifs, ...incomingNotifs };
 
   const existingSecurity =
-    base.sessionSecurity && typeof base.sessionSecurity === 'object' && !Array.isArray(base.sessionSecurity)
+    base.sessionSecurity &&
+    typeof base.sessionSecurity === 'object' &&
+    !Array.isArray(base.sessionSecurity)
       ? (base.sessionSecurity as Record<string, unknown>)
       : {};
 
   const incomingSecurity =
-    next.sessionSecurity && typeof next.sessionSecurity === 'object' && !Array.isArray(next.sessionSecurity)
+    next.sessionSecurity &&
+    typeof next.sessionSecurity === 'object' &&
+    !Array.isArray(next.sessionSecurity)
       ? (next.sessionSecurity as Record<string, unknown>)
       : {};
 
@@ -196,12 +209,18 @@ function sanitizePreferences(
       statusUpdates: Boolean(mergedNotifs.statusUpdates ?? true),
     },
     sessionSecurity: {
-      inactivityTimeoutMinutes: resolveInactivityTimeout(mergedSecurity.inactivityTimeoutMinutes),
+      inactivityTimeoutMinutes: resolveInactivityTimeout(
+        mergedSecurity.inactivityTimeoutMinutes
+      ),
       logoutOnClose: sessionSecurity.logoutOnClose,
       warnBeforeLockSeconds: resolveWarnBeforeLock(mergedSecurity.warnBeforeLockSeconds),
     },
     dateFormat: pickOneOf(next.dateFormat ?? base.dateFormat, DATE_FORMATS, 'MM/DD/YYYY'),
-    timezone: pickOneOf(next.timezone ?? base.timezone, TIMEZONES, 'America/New_York (EST)'),
+    timezone: pickOneOf(
+      next.timezone ?? base.timezone,
+      TIMEZONES,
+      'America/New_York (EST)'
+    ),
     pageSize: pickOneOf(Number(next.pageSize ?? base.pageSize), PAGE_SIZES, 25),
     avatarColor: pickOneOf(
       next.avatarColor ?? base.avatarColor,
@@ -214,37 +233,44 @@ function sanitizePreferences(
 const ROLE_INFO: Record<UserRole, { title: string; description: string; level: string }> = {
   administrator: {
     title: 'System Administrator',
-    description: 'Complete operational and administrative control across all practices, users, and billing workflows.',
+    description:
+      'Complete operational and administrative control across all practices, users, and billing workflows.',
     level: 'Tier 1 - Full System Access',
   },
   supervisor: {
     title: 'Operations Supervisor',
-    description: 'Supervises billing operations, audits claims, approves sign-offs, and manages AR batch imports.',
+    description:
+      'Supervises billing operations, audits claims, approves sign-offs, and manages AR batch imports.',
     level: 'Tier 2 - Operational Leadership',
   },
   manager: {
     title: 'Account Manager',
-    description: 'Oversees client practice accounts, monitors collection benchmarks, and leads billing team workflows.',
+    description:
+      'Oversees client practice accounts, monitors collection benchmarks, and leads billing team workflows.',
     level: 'Tier 2 - Operational Management',
   },
   senior_lead: {
     title: 'Senior Team Lead',
-    description: 'Assists with AR batch uploads, audits complex denials, and mentors AR executives and billing users.',
+    description:
+      'Assists with AR batch uploads, audits complex denials, and mentors AR executives and billing users.',
     level: 'Tier 3 - Senior Leadership',
   },
   team_lead: {
     title: 'Team Lead',
-    description: 'Coordinates daily team claim assignments, audits work queues, and reviews sign-off submissions.',
+    description:
+      'Coordinates daily team claim assignments, audits work queues, and reviews sign-off submissions.',
     level: 'Tier 3 - Team Leadership',
   },
   ar_executive: {
     title: 'AR Executive',
-    description: 'Focuses on working unpaid claims, resolving payer denials, contacting insurance reps, and filing appeals.',
+    description:
+      'Focuses on working unpaid claims, resolving payer denials, contacting insurance reps, and filing appeals.',
     level: 'Tier 4 - AR Specialist',
   },
   billing_user: {
     title: 'Billing Specialist',
-    description: 'Handles charge entry, payment posting, verification of benefits, and prior authorization tasks.',
+    description:
+      'Handles charge entry, payment posting, verification of benefits, and prior authorization tasks.',
     level: 'Tier 4 - Billing Specialist',
   },
 };
@@ -255,6 +281,8 @@ export async function GET() {
     if (!sessionUser) {
       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
     }
+    const tenant = await resolveTenantContext();
+    const activeCtx = tenant.status === 'ok' ? tenant.ctx : null;
 
     const [fullUser] = await db
       .select({
@@ -280,9 +308,11 @@ export async function GET() {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
-    // Fetch team lead details if assigned
+    const effectiveRole = activeCtx ? activeCtx.user.role : sessionUser.role;
+    const effectiveTeamLeadId = sessionUser.teamLeadId || fullUser.teamLeadId;
+
     let teamLeadInfo = null;
-    if (fullUser.teamLeadId) {
+    if (effectiveTeamLeadId) {
       const [lead] = await db
         .select({
           id: users.id,
@@ -292,37 +322,59 @@ export async function GET() {
           role: users.role,
         })
         .from(users)
-        .where(eq(users.id, fullUser.teamLeadId))
+        .where(eq(users.id, effectiveTeamLeadId))
         .limit(1);
       teamLeadInfo = lead || null;
     }
 
-    // Fetch assigned practices
-    let assignedPractices: Array<{ id: string; name: string; code: string; specialty: string | null }> = [];
-    if (['administrator', 'supervisor', 'manager'].includes(fullUser.role)) {
-      assignedPractices = await db
-        .select({ id: practices.id, name: practices.name, code: practices.code, specialty: practices.specialty })
-        .from(practices)
-        .where(eq(practices.isActive, true))
-        .orderBy(practices.name);
-    } else {
-      const userAssignments = await db
-        .select({ practiceId: userPracticeAssignments.practiceId })
-        .from(userPracticeAssignments)
-        .where(eq(userPracticeAssignments.userId, fullUser.id));
-
-      const practiceIds = userAssignments.map((a) => a.practiceId);
-      if (practiceIds.length > 0) {
+    // Strict tenant isolation: only return practices in the user's active organization!
+    let assignedPractices: Array<{
+      id: string;
+      name: string;
+      code: string;
+      specialty: string | null;
+    }> = [];
+    if (activeCtx) {
+      const orgId = activeCtx.organizationId;
+      if (['administrator', 'supervisor', 'manager'].includes(effectiveRole)) {
         assignedPractices = await db
-          .select({ id: practices.id, name: practices.name, code: practices.code, specialty: practices.specialty })
+          .select({
+            id: practices.id,
+            name: practices.name,
+            code: practices.code,
+            specialty: practices.specialty,
+          })
           .from(practices)
-          .where(inArray(practices.id, practiceIds))
+          .where(and(eq(practices.organizationId, orgId), eq(practices.isActive, true)))
           .orderBy(practices.name);
+      } else {
+        const userAssignments = await db
+          .select({ practiceId: userPracticeAssignments.practiceId })
+          .from(userPracticeAssignments)
+          .where(
+            and(
+              eq(userPracticeAssignments.organizationId, orgId),
+              eq(userPracticeAssignments.userId, fullUser.id)
+            )
+          );
+
+        const practiceIds = userAssignments.map((a) => a.practiceId);
+        if (practiceIds.length > 0) {
+          assignedPractices = await db
+            .select({
+              id: practices.id,
+              name: practices.name,
+              code: practices.code,
+              specialty: practices.specialty,
+            })
+            .from(practices)
+            .where(and(eq(practices.organizationId, orgId), inArray(practices.id, practiceIds)))
+            .orderBy(practices.name);
+        }
       }
     }
 
-    // Role permissions breakdown
-    const grantedKeys = ROLE_PERMISSIONS[fullUser.role as UserRole] || [];
+    const grantedKeys = ROLE_PERMISSIONS[effectiveRole] || [];
     const grantedPermissions = grantedKeys.map((key) => ({
       key,
       label: PERMISSION_DESCRIPTIONS[key]?.label || key,
@@ -340,24 +392,28 @@ export async function GET() {
       isGranted: false,
     }));
 
+    const isReadOnly = activeCtx?.isReadOnly ?? false;
     const capabilities = {
-      canUploadFiles: canUploadFiles(fullUser.role as UserRole),
-      canAssignClaims: canAssignClaims(fullUser.role as UserRole),
-      canAssignTasks: canAssignTasks(fullUser.role as UserRole),
-      canAssignPractices: canAssignPractices(fullUser.role as UserRole),
-      canReviewClaims: canReviewClaims(fullUser.role as UserRole),
-      canReviewSignoffs: canReviewSignoffs(fullUser.role as UserRole),
-      canManageUsers: canManageUsers(fullUser.role as UserRole),
-      canViewReports: canViewReports(fullUser.role as UserRole),
-      isSupervisorOrAbove: isSupervisorOrAbove(fullUser.role as UserRole),
+      canUploadFiles: !isReadOnly && canUploadFiles(effectiveRole),
+      canAssignClaims: !isReadOnly && canAssignClaims(effectiveRole),
+      canAssignTasks: !isReadOnly && canAssignTasks(effectiveRole),
+      canAssignPractices: !isReadOnly && canAssignPractices(effectiveRole),
+      canReviewClaims: !isReadOnly && canReviewClaims(effectiveRole),
+      canReviewSignoffs: !isReadOnly && canReviewSignoffs(effectiveRole),
+      canManageUsers: !isReadOnly && canManageUsers(effectiveRole),
+      canViewReports: canViewReports(effectiveRole) || isReadOnly,
+      isSupervisorOrAbove: isSupervisorOrAbove(effectiveRole),
     };
 
     return NextResponse.json({
       user: {
         ...fullUser,
+        role: effectiveRole,
+        orgRole: activeCtx?.orgRole ?? null,
+        organizationName: activeCtx?.organization.name ?? null,
         preferences: sanitizePreferences(fullUser.preferences, null),
-        roleInfo: ROLE_INFO[fullUser.role as UserRole] || {
-          title: fullUser.role,
+        roleInfo: ROLE_INFO[effectiveRole] || {
+          title: effectiveRole,
           description: '',
           level: 'Standard User',
         },
@@ -382,6 +438,8 @@ export async function PATCH(request: NextRequest) {
     if (!sessionUser) {
       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
     }
+    const tenant = await resolveTenantContext();
+    const activeCtx = tenant.status === 'ok' ? tenant.ctx : null;
 
     const body = await request.json();
     const updateData: Partial<typeof users.$inferInsert> = {};
@@ -443,7 +501,9 @@ export async function PATCH(request: NextRequest) {
       });
 
     await createAuditLog({
+      organizationId: activeCtx?.organizationId,
       userId: sessionUser.id,
+      actorRole: activeCtx?.orgRole,
       action: AUDIT_ACTIONS.USER_UPDATED,
       entityType: 'user_profile',
       entityId: sessionUser.id,

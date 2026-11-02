@@ -1,22 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { billingTasks, taskDocuments, users } from '@/db/schema';
-import { eq, desc } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { and, eq, desc } from 'drizzle-orm';
 import { createAuditLog } from '@/lib/audit';
-import { createNotification } from '@/lib/notifications';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { organizationId } = auth.ctx;
 
     const { id } = await params;
+
+    const [task] = await db
+      .select({ id: billingTasks.id })
+      .from(billingTasks)
+      .where(and(eq(billingTasks.id, id), eq(billingTasks.organizationId, organizationId)))
+      .limit(1);
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
 
     const documents = await db
       .select({
@@ -34,23 +41,21 @@ export async function GET(
       })
       .from(taskDocuments)
       .leftJoin(users, eq(taskDocuments.uploadedBy, users.id))
-      .where(eq(taskDocuments.taskId, id))
+      .where(and(eq(taskDocuments.taskId, id), eq(taskDocuments.organizationId, organizationId)))
       .orderBy(desc(taskDocuments.createdAt));
 
     return NextResponse.json({
-      documents: documents.map(d => ({
+      documents: documents.map((d) => ({
         ...d,
-        uploaderName: d.uploaderName && d.uploaderLastName 
-          ? `${d.uploaderName} ${d.uploaderLastName}` 
-          : 'Unknown',
+        uploaderName:
+          d.uploaderName && d.uploaderLastName
+            ? `${d.uploaderName} ${d.uploaderLastName}`
+            : 'Unknown',
       })),
     });
   } catch (error) {
     console.error('Get task documents error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch documents' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch documents' }, { status: 500 });
   }
 }
 
@@ -59,17 +64,17 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
 
     const { id } = await params;
 
     const [task] = await db
       .select()
       .from(billingTasks)
-      .where(eq(billingTasks.id, id))
+      .where(and(eq(billingTasks.id, id), eq(billingTasks.organizationId, organizationId)))
       .limit(1);
 
     if (!task) {
@@ -87,7 +92,6 @@ export async function POST(
       );
     }
 
-    // Validate file type or extension
     const allowedTypes = [
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -101,7 +105,19 @@ export async function POST(
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ];
     const ext = (file.name.split('.').pop() || '').toLowerCase();
-    const allowedExts = ['pdf', 'xlsx', 'xls', 'csv', 'txt', 'png', 'jpg', 'jpeg', 'webp', 'doc', 'docx'];
+    const allowedExts = [
+      'pdf',
+      'xlsx',
+      'xls',
+      'csv',
+      'txt',
+      'png',
+      'jpg',
+      'jpeg',
+      'webp',
+      'doc',
+      'docx',
+    ];
     if (!allowedTypes.includes(file.type) && !allowedExts.includes(ext)) {
       return NextResponse.json(
         { error: 'Invalid file type. Allowed: PDF, XLSX, XLS, CSV, TXT, PNG, JPG, DOC, DOCX' },
@@ -115,6 +131,7 @@ export async function POST(
     const [document] = await db
       .insert(taskDocuments)
       .values({
+        organizationId,
         taskId: id,
         documentType,
         fileName: file.name,
@@ -127,7 +144,9 @@ export async function POST(
       .returning();
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: 'task_document_uploaded',
       entityType: 'taskDocument',
       entityId: document.id,
@@ -149,9 +168,6 @@ export async function POST(
     });
   } catch (error) {
     console.error('Upload task document error:', error);
-    return NextResponse.json(
-      { error: 'Failed to upload document' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to upload document' }, { status: 500 });
   }
 }

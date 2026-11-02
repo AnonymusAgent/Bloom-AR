@@ -1,46 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { denialCodes } from '@/db/schema';
-import { eq, ilike, or, and, sql } from 'drizzle-orm';
-import { getCurrentUser, canManageUsers } from '@/lib/auth';
+import { eq, ilike, or, and, isNull } from 'drizzle-orm';
+import { canManageUsers } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
-import { ALL_DENIAL_CODES } from '@/lib/denial-codes-data';
-
-async function ensureBuiltinDenialCodes(): Promise<void> {
-  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(denialCodes);
-  if (count > 0) return;
-  const seen = new Set<string>();
-  const batch = [];
-  for (const c of ALL_DENIAL_CODES) {
-    if (seen.has(c.code)) continue;
-    seen.add(c.code);
-    batch.push({
-      code: c.code,
-      codeType: c.codeType,
-      description: c.description,
-      category: c.category,
-    });
-  }
-  if (batch.length > 0) {
-    await db.insert(denialCodes).values(batch).onConflictDoNothing();
-  }
-}
+import { ensureStandardDenialCodes } from '@/lib/standard-denial-codes';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const auth = await requireTenantContext();
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
-    await ensureBuiltinDenialCodes();
+    await ensureStandardDenialCodes();
 
     const searchParams = request.nextUrl.searchParams;
     const search = searchParams.get('search');
     const codeType = searchParams.get('codeType');
     const category = searchParams.get('category');
 
-    const conditions = [];
+    // Return global standard X12 CARC/RARC codes PLUS custom codes belonging ONLY to this organization
+    const conditions = [
+      or(
+        isNull(denialCodes.organizationId),
+        eq(denialCodes.organizationId, ctx.organizationId)
+      )!,
+      eq(denialCodes.isActive, true),
+    ];
 
     if (search) {
       conditions.push(
@@ -48,7 +35,7 @@ export async function GET(request: NextRequest) {
           ilike(denialCodes.code, `%${search}%`),
           ilike(denialCodes.description, `%${search}%`),
           ilike(denialCodes.category, `%${search}%`)
-        )
+        )!
       );
     }
 
@@ -60,9 +47,7 @@ export async function GET(request: NextRequest) {
       conditions.push(eq(denialCodes.category, category));
     }
 
-    conditions.push(eq(denialCodes.isActive, true));
-
-    const limit = parseInt(searchParams.get('limit') || '500');
+    const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '500') || 500, 1), 1000);
 
     const codes = await db
       .select()
@@ -74,17 +59,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ denialCodes: codes });
   } catch (error) {
     console.error('Get denial codes error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch denial codes' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch denial codes' }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !canManageUsers(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+
+    if (!canManageUsers(ctx.user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -104,16 +89,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if code already exists
+    const normalizedCode = String(code).trim().toUpperCase();
+
     const [existing] = await db
       .select()
       .from(denialCodes)
-      .where(eq(denialCodes.code, code))
+      .where(
+        and(
+          eq(denialCodes.code, normalizedCode),
+          or(
+            isNull(denialCodes.organizationId),
+            eq(denialCodes.organizationId, ctx.organizationId)
+          )
+        )
+      )
       .limit(1);
 
     if (existing) {
       return NextResponse.json(
-        { error: 'Denial code already exists' },
+        { error: 'Denial code already exists in standard or workspace catalog' },
         { status: 400 }
       );
     }
@@ -121,19 +115,22 @@ export async function POST(request: NextRequest) {
     const [newCode] = await db
       .insert(denialCodes)
       .values({
-        code,
+        organizationId: ctx.organizationId,
+        code: normalizedCode,
         codeType,
-        description,
+        description: String(description).trim(),
         category: category || null,
       })
       .returning();
 
     await createAuditLog({
-      userId: user.id,
+      organizationId: ctx.organizationId,
+      userId: ctx.user.id,
+      actorRole: ctx.orgRole,
       action: AUDIT_ACTIONS.DENIAL_CODE_ADDED,
       entityType: 'denialCode',
       entityId: String(newCode.id),
-      newValue: { code, codeType, description, category },
+      newValue: { code: normalizedCode, codeType, description, category },
       ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
       userAgent: request.headers.get('user-agent') || undefined,
     });
@@ -141,9 +138,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ denialCode: newCode });
   } catch (error) {
     console.error('Create denial code error:', error);
-    return NextResponse.json(
-      { error: 'Failed to create denial code' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create denial code' }, { status: 500 });
   }
 }

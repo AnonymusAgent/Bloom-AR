@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { claims, claimStatusHistory, claimNotes, users } from '@/db/schema';
+import { claims, claimStatusHistory, claimNotes, users, organizationMembers } from '@/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { isSupervisorOrAbove } from '@/lib/auth';
 import { createAuditLog } from '@/lib/audit';
 import { createNotification } from '@/lib/notifications';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 export async function POST(
   request: NextRequest,
@@ -13,8 +14,11 @@ export async function POST(
 ) {
   try {
     await ensureSaaSColumns();
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
     const { id } = await params;
 
     const {
@@ -30,13 +34,16 @@ export async function POST(
 
     if (!action) return NextResponse.json({ error: 'Action is required' }, { status: 400 });
 
-    const [claim] = await db.select().from(claims).where(eq(claims.id, id)).limit(1);
+    const [claim] = await db
+      .select()
+      .from(claims)
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
+      .limit(1);
     if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
 
     const canSupervise = isSupervisorOrAbove(user.role) || user.role === 'team_lead';
     const isAssignedOwner = claim.assignedTo === user.id;
 
-    // Frontline roles can only perform worker actions on claims assigned to them
     if (
       ['start_working', 'save_progress', 'submit_for_approval', 'mark_dead'].includes(action) &&
       !canSupervise &&
@@ -117,13 +124,20 @@ export async function POST(
         auditAction = 'claim_submitted_for_approval';
         noteText = remarks?.trim() || 'Submitted for supervisor approval';
 
-        // Prefer worker's team lead if configured, otherwise first active supervisor/lead
         if (user.teamLeadId) {
           notifyUserId = user.teamLeadId;
         } else {
           const [lead] = await db
             .select({ id: users.id })
             .from(users)
+            .innerJoin(
+              organizationMembers,
+              and(
+                eq(organizationMembers.userId, users.id),
+                eq(organizationMembers.organizationId, organizationId),
+                eq(organizationMembers.isActive, true)
+              )
+            )
             .where(
               and(
                 eq(users.isActive, true),
@@ -144,9 +158,15 @@ export async function POST(
 
       case 'approve': {
         if (!canSupervise) {
-          return NextResponse.json({ error: 'Only supervisors can approve claims' }, { status: 403 });
+          return NextResponse.json(
+            { error: 'Only supervisors can approve claims' },
+            { status: 403 }
+          );
         }
-        if (claim.workflowStatus !== 'pending_approval' && claim.status !== 'submitted_for_review') {
+        if (
+          claim.workflowStatus !== 'pending_approval' &&
+          claim.status !== 'submitted_for_review'
+        ) {
           return NextResponse.json({ error: 'Claim must be pending approval' }, { status: 400 });
         }
         if (claim.workedBy === user.id) {
@@ -190,7 +210,10 @@ export async function POST(
         if (!reworkReason || reworkReason.trim().length === 0) {
           return NextResponse.json({ error: 'Rework reason is mandatory' }, { status: 400 });
         }
-        if (claim.workflowStatus !== 'pending_approval' && claim.status !== 'submitted_for_review') {
+        if (
+          claim.workflowStatus !== 'pending_approval' &&
+          claim.status !== 'submitted_for_review'
+        ) {
           return NextResponse.json({ error: 'Claim must be pending approval' }, { status: 400 });
         }
         update.workflowStatus = 'rework';
@@ -226,10 +249,15 @@ export async function POST(
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
 
-    const [updated] = await db.update(claims).set(update).where(eq(claims.id, id)).returning();
+    const [updated] = await db
+      .update(claims)
+      .set(update)
+      .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
+      .returning();
 
     if (shouldWriteStatusHistory) {
       await db.insert(claimStatusHistory).values({
+        organizationId,
         claimId: id,
         previousStatus: claim.status,
         newStatus: updated.status,
@@ -240,6 +268,7 @@ export async function POST(
 
     if (noteText) {
       await db.insert(claimNotes).values({
+        organizationId,
         claimId: id,
         userId: user.id,
         note: noteText,
@@ -249,6 +278,7 @@ export async function POST(
 
     if (notifyUserId) {
       await createNotification({
+        organizationId,
         userId: notifyUserId,
         type:
           action === 'approve'
@@ -263,7 +293,9 @@ export async function POST(
     }
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: auditAction,
       entityType: 'claim',
       entityId: id,

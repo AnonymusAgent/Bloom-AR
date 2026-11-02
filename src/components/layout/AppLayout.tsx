@@ -2,17 +2,35 @@
 
 import React, { useState, useEffect } from 'react';
 import { Sidebar } from './Sidebar';
-import { Header } from './Header';
+import { Header, type WorkspaceMembership } from './Header';
 import { MedicalLoadingScreen } from '@/components/ui/MedicalLoader';
 import SessionGuard from '@/components/auth/SessionGuard';
 import { clearStoredSessionSecurity } from '@/lib/session-security';
 
-interface User { id: string; email: string; firstName: string; lastName: string; role: string; }
-interface AppLayoutProps { children: React.ReactNode; title?: string; }
+interface AppUser {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  role: string;
+  isPlatformAdmin?: boolean;
+  organizationId?: string | null;
+  organizationName?: string | null;
+  organizationStatus?: string | null;
+  orgRole?: string | null;
+  memberships?: WorkspaceMembership[];
+}
+
+interface AppLayoutProps {
+  children: React.ReactNode;
+  title?: string;
+}
 
 export function AppLayout({ children, title }: AppLayoutProps) {
-  const [user, setUser] = useState<User | null>(null);
-  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading');
+  const [user, setUser] = useState<AppUser | null>(null);
+  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>(
+    'loading'
+  );
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -21,17 +39,31 @@ export function AppLayout({ children, title }: AppLayoutProps) {
       try {
         const res = await fetch('/api/auth/me', { credentials: 'include' });
         if (!cancelled) {
-          if (res.ok) { const data = await res.json(); setUser(data.user); setAuthState('authenticated'); }
-          else { setAuthState('unauthenticated'); }
+          if (res.ok) {
+            const data = await res.json();
+            setUser({
+              ...data.user,
+              memberships: data.organizations || data.user?.memberships || [],
+            });
+            setAuthState('authenticated');
+          } else {
+            setAuthState('unauthenticated');
+          }
         }
-      } catch { if (!cancelled) setAuthState('unauthenticated'); }
+      } catch {
+        if (!cancelled) setAuthState('unauthenticated');
+      }
     };
     fetchUser();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleLogout = async () => {
-    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch {}
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
     clearStoredSessionSecurity();
     window.location.replace('/login');
   };
@@ -45,11 +77,28 @@ export function AppLayout({ children, title }: AppLayoutProps) {
       <div className="min-h-screen bg-[#F5F7FA] flex items-center justify-center">
         <div className="text-center bg-white p-8 rounded-xl shadow-sm border border-[#E5E7EB] max-w-sm">
           <div className="w-12 h-12 bg-blue-50 text-[#2563EB] rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+            <svg
+              className="w-6 h-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+              />
+            </svg>
           </div>
           <h2 className="text-lg font-semibold text-slate-900 mb-2">Session Expired</h2>
           <p className="text-[#64748B] text-sm mb-6">Please sign in to continue.</p>
-          <a href="/login" className="inline-flex items-center justify-center px-6 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] font-medium text-sm transition-colors">Go to Login</a>
+          <a
+            href="/login"
+            className="inline-flex items-center justify-center px-6 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] font-medium text-sm transition-colors"
+          >
+            Go to Login
+          </a>
         </div>
       </div>
     );
@@ -65,12 +114,32 @@ export function AppLayout({ children, title }: AppLayoutProps) {
           onExpand={() => setCollapsed(false)}
           onLogout={handleLogout}
         />
-        <div className={`flex-1 flex flex-col transition-all duration-300 ${collapsed ? 'ml-[60px]' : 'ml-[240px]'}`}>
+        <div
+          className={`flex-1 flex flex-col transition-all duration-300 ${
+            collapsed ? 'ml-[60px]' : 'ml-[240px]'
+          }`}
+        >
           <Header user={user} title={title} />
+          {user.organizationStatus === 'suspended' && (
+            <div className="bg-red-600 text-white px-6 py-2 text-xs font-medium flex items-center justify-between">
+              <span>
+                This organization workspace is currently suspended. Operational data access is
+                restricted until reactivated by a platform administrator.
+              </span>
+            </div>
+          )}
+          {user.orgRole === 'read_only' && user.organizationStatus !== 'suspended' && (
+            <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-6 py-2 text-xs font-medium">
+              Read-Only Access — You can view dashboards, claims, and reports in{' '}
+              <b>{user.organizationName || 'this workspace'}</b>, but creating or modifying records
+              is disabled for your role.
+            </div>
+          )}
           <main className="flex-1 p-5">{children}</main>
           <footer className="px-5 py-3 border-t border-[#E5E7EB] bg-white">
             <p className="text-center text-[11px] text-[#64748B]">
-              Made with ❤️ by WebLoom &nbsp;|&nbsp; © {new Date().getFullYear()} Web Loom LLC. All rights reserved.
+              Made with ❤️ by WebLoom &nbsp;|&nbsp; © {new Date().getFullYear()} Web Loom LLC. All
+              rights reserved.
             </p>
           </footer>
         </div>

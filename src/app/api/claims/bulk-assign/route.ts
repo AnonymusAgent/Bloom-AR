@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims, users, claimStatusHistory } from '@/db/schema';
-import { eq, inArray } from 'drizzle-orm';
-import { getCurrentUser, canAssignClaims } from '@/lib/auth';
+import { and, eq, inArray } from 'drizzle-orm';
+import { canAssignClaims } from '@/lib/auth';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 import { createNotification, NOTIFICATION_TEMPLATES } from '@/lib/notifications';
+import { requireTenantContext } from '@/lib/tenant-context';
+import { verifyUserInOrg } from '@/lib/rbac';
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await getCurrentUser();
-    if (!user || !canAssignClaims(user.role)) {
+    const auth = await requireTenantContext({ allowMutation: true });
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
+    const { user, organizationId } = ctx;
+
+    if (!canAssignClaims(user.role)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
@@ -23,6 +29,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Assignee ID is required' }, { status: 400 });
     }
 
+    const inOrg = await verifyUserInOrg(assigneeId, organizationId);
+    if (!inOrg) {
+      return NextResponse.json(
+        { error: 'Assignee not found in your organization' },
+        { status: 404 }
+      );
+    }
+
     const [assignee] = await db
       .select()
       .from(users)
@@ -33,13 +47,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Assignee not found' }, { status: 404 });
     }
 
-    // Get existing claims
     const existingClaims = await db
       .select()
       .from(claims)
-      .where(inArray(claims.id, claimIds));
+      .where(and(eq(claims.organizationId, organizationId), inArray(claims.id, claimIds)));
 
-    // Update all claims
+    if (existingClaims.length === 0) {
+      return NextResponse.json(
+        { error: 'No matching claims found in your organization' },
+        { status: 404 }
+      );
+    }
+
+    const validIds = existingClaims.map((c) => c.id);
+
     await db
       .update(claims)
       .set({
@@ -49,12 +70,12 @@ export async function POST(request: NextRequest) {
         status: 'assigned',
         updatedAt: new Date(),
       })
-      .where(inArray(claims.id, claimIds));
+      .where(and(eq(claims.organizationId, organizationId), inArray(claims.id, validIds)));
 
-    // Create status history for each claim
     for (const claim of existingClaims) {
       if (claim.status !== 'assigned') {
         await db.insert(claimStatusHistory).values({
+          organizationId,
           claimId: claim.id,
           previousStatus: claim.status,
           newStatus: 'assigned',
@@ -64,34 +85,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Create notification for assignee
-    const template = NOTIFICATION_TEMPLATES.newAssignment(`${claimIds.length} claims`);
+    const template = NOTIFICATION_TEMPLATES.newAssignment(`${validIds.length} claims`);
     await createNotification({
+      organizationId,
       userId: assigneeId,
       type: template.type,
       title: 'New Claims Assigned',
-      message: `You have been assigned ${claimIds.length} new claims`,
+      message: `You have been assigned ${validIds.length} new claims`,
     });
 
     await createAuditLog({
+      organizationId,
       userId: user.id,
+      actorRole: ctx.orgRole,
       action: AUDIT_ACTIONS.CLAIM_ASSIGNED,
       entityType: 'claim',
-      entityId: claimIds.join(','),
-      newValue: { assignedTo: assigneeId, claimCount: claimIds.length },
+      entityId: validIds.join(',').slice(0, 100),
+      newValue: { assignedTo: assigneeId, claimCount: validIds.length },
       ipAddress: request.headers.get('x-forwarded-for') || 'unknown',
       userAgent: request.headers.get('user-agent') || undefined,
     });
 
     return NextResponse.json({
       success: true,
-      assignedCount: claimIds.length,
+      assignedCount: validIds.length,
     });
   } catch (error) {
     console.error('Bulk assign error:', error);
-    return NextResponse.json(
-      { error: 'Failed to assign claims' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to assign claims' }, { status: 500 });
   }
 }

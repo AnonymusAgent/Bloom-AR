@@ -16,6 +16,18 @@ function AccountSettingsContent() {
   const [profile, setProfile] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
   const [orgs, setOrgs] = useState<any[]>([]);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
+  const [mfa, setMfa] = useState<{ enabled: boolean; verifiedAt?: string | null }>({
+    enabled: false,
+  });
+  const [mfaSetup, setMfaSetup] = useState<{
+    secret: string;
+    otpauthUri: string;
+    recoveryCodes?: string[];
+  } | null>(null);
+  const [issuedRecoveryCodes, setIssuedRecoveryCodes] = useState<string[] | null>(null);
+  const [mfaCode, setMfaCode] = useState('');
+  const [disableMfaPassword, setDisableMfaPassword] = useState('');
   const [msg, setMsg] = useState('');
   const [pw, setPw] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
 
@@ -23,7 +35,13 @@ function AccountSettingsContent() {
     const p = await (await fetch('/api/profile')).json();
     setProfile(p);
     setSessions((await (await fetch('/api/account/sessions')).json()).sessions || []);
-    setOrgs((await (await fetch('/api/organizations')).json()).organizations || []);
+    const orgData = await (await fetch('/api/organizations')).json();
+    setOrgs(orgData.organizations || []);
+    setActiveOrgId(orgData.activeOrganizationId || null);
+    const mfaRes = await fetch('/api/account/mfa');
+    if (mfaRes.ok) {
+      setMfa(await mfaRes.json());
+    }
   };
   useEffect(() => {
     load();
@@ -69,7 +87,7 @@ function AccountSettingsContent() {
   };
   const tabs: [typeof tab, string][] = [
     ['profile', 'Profile'],
-    ['security', 'Security & Sessions'],
+    ['security', 'Security, MFA & Sessions'],
     ['preferences', 'Preferences'],
     ['organizations', 'My Organizations'],
   ];
@@ -97,7 +115,10 @@ function AccountSettingsContent() {
           ))}
         </nav>
         {msg && (
-          <p role="status" className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-4 py-2 text-sm">
+          <p
+            role="status"
+            className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-4 py-2 text-sm"
+          >
             {msg}
           </p>
         )}
@@ -110,7 +131,9 @@ function AccountSettingsContent() {
                 <input
                   className={inp}
                   value={u.firstName}
-                  onChange={(e) => setProfile({ ...profile, user: { ...u, firstName: e.target.value } })}
+                  onChange={(e) =>
+                    setProfile({ ...profile, user: { ...u, firstName: e.target.value } })
+                  }
                 />
               </div>
               <div>
@@ -118,7 +141,9 @@ function AccountSettingsContent() {
                 <input
                   className={inp}
                   value={u.lastName}
-                  onChange={(e) => setProfile({ ...profile, user: { ...u, lastName: e.target.value } })}
+                  onChange={(e) =>
+                    setProfile({ ...profile, user: { ...u, lastName: e.target.value } })
+                  }
                 />
               </div>
             </div>
@@ -130,7 +155,9 @@ function AccountSettingsContent() {
                 <input
                   className={inp}
                   value={u.phone || ''}
-                  onChange={(e) => setProfile({ ...profile, user: { ...u, phone: e.target.value } })}
+                  onChange={(e) =>
+                    setProfile({ ...profile, user: { ...u, phone: e.target.value } })
+                  }
                 />
               </div>
               <div>
@@ -138,7 +165,9 @@ function AccountSettingsContent() {
                 <input
                   className={inp}
                   value={u.avatarUrl || ''}
-                  onChange={(e) => setProfile({ ...profile, user: { ...u, avatarUrl: e.target.value } })}
+                  onChange={(e) =>
+                    setProfile({ ...profile, user: { ...u, avatarUrl: e.target.value } })
+                  }
                 />
               </div>
             </div>
@@ -153,6 +182,149 @@ function AccountSettingsContent() {
         )}
         {tab === 'security' && (
           <>
+            <section className={card}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="font-bold">Two-Factor Authentication (TOTP MFA)</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Protect healthcare workspace sign-ins with RFC 6238 authenticator codes and
+                    backup recovery codes.
+                  </p>
+                </div>
+                <span
+                  className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                    mfa.enabled
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  {mfa.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+
+              {!mfa.enabled && !mfaSetup && (
+                <button
+                  className={`${btn} mt-4`}
+                  onClick={async () => {
+                    const r = await fetch('/api/account/mfa', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ action: 'setup' }),
+                    });
+                    const d = await r.json();
+                    if (r.ok) {
+                      setMfaSetup(d);
+                      setMsg('Enter a 6-digit code from your authenticator app to activate MFA.');
+                    } else {
+                      setMsg(d.error || 'Failed to start MFA setup.');
+                    }
+                  }}
+                >
+                  Set up Authenticator App
+                </button>
+              )}
+
+              {mfaSetup && !mfa.enabled && (
+                <div className="mt-4 space-y-3 bg-slate-50 border rounded-lg p-4">
+                  <p className="text-xs font-semibold text-slate-700">
+                    1. Add this setup key to your authenticator app (Google Authenticator, 1Password,
+                    Authy, Microsoft Authenticator):
+                  </p>
+                  <code className="block bg-white border rounded px-3 py-2 text-xs font-mono select-all">
+                    {mfaSetup.secret}
+                  </code>
+                  <div>
+                    <label className={lbl}>2. Enter 6-digit code to verify &amp; enable</label>
+                    <div className="flex gap-2 mt-1">
+                      <input
+                        className={inp}
+                        placeholder="123456"
+                        value={mfaCode}
+                        onChange={(e) => setMfaCode(e.target.value)}
+                      />
+                      <button
+                        className={btn}
+                        onClick={async () => {
+                          const r = await fetch('/api/account/mfa', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'verify', code: mfaCode }),
+                          });
+                          const d = await r.json();
+                          if (r.ok) {
+                            setMfaSetup(null);
+                            setMfaCode('');
+                            setIssuedRecoveryCodes(d.recoveryCodes || null);
+                            setMsg(
+                              'Two-factor authentication is now enabled. Save your recovery codes below!'
+                            );
+                            load();
+                          } else {
+                            setMsg(d.error || 'Invalid verification code.');
+                          }
+                        }}
+                      >
+                        Enable MFA
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {issuedRecoveryCodes && issuedRecoveryCodes.length > 0 && (
+                <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
+                  <p className="text-xs font-bold text-amber-900">
+                    Save these one-time recovery codes in a safe place (shown only once):
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {issuedRecoveryCodes.map((rc) => (
+                      <code
+                        key={rc}
+                        className="bg-white border rounded px-2 py-1 text-center text-xs font-mono"
+                      >
+                        {rc}
+                      </code>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {mfa.enabled && (
+                <div className="mt-4 pt-3 border-t space-y-2">
+                  <label className={lbl}>Confirm account password to disable MFA</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      className={inp}
+                      placeholder="Current password"
+                      value={disableMfaPassword}
+                      onChange={(e) => setDisableMfaPassword(e.target.value)}
+                    />
+                    <button
+                      className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold whitespace-nowrap"
+                      onClick={async () => {
+                        const r = await fetch('/api/account/mfa', {
+                          method: 'DELETE',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ password: disableMfaPassword }),
+                        });
+                        const d = await r.json();
+                        if (r.ok) {
+                          setDisableMfaPassword('');
+                          setMsg('MFA disabled.');
+                          load();
+                        } else {
+                          setMsg(d.error || 'Could not disable MFA.');
+                        }
+                      }}
+                    >
+                      Disable MFA
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
             <section className={card}>
               <h2 className="font-bold">Change password</h2>
               {[
@@ -290,16 +462,49 @@ function AccountSettingsContent() {
           <section className={card}>
             <h2 className="font-bold">My organizations</h2>
             <ul className="text-sm mt-2 space-y-2">
-              {orgs.map((o) => (
-                <li key={o.id} className="border rounded-lg p-3 flex justify-between">
-                  <span>
-                    <b>{o.name}</b> ({o.slug}) — {o.status}
-                  </span>
-                  <a className="text-[#2563EB]" href="/settings/organization">
-                    Manage
-                  </a>
-                </li>
-              ))}
+              {orgs.map((o) => {
+                const isActiveOrg = o.id === activeOrgId;
+                return (
+                  <li
+                    key={o.id}
+                    className="border rounded-lg p-3 flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <div>
+                      <b>{o.name}</b> ({o.slug}) — {o.status}
+                      {o.orgRole && (
+                        <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold uppercase">
+                          {o.orgRole.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {isActiveOrg && (
+                        <span className="ml-2 text-xs px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 font-semibold">
+                          Active workspace
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {!isActiveOrg && (
+                        <button
+                          className="text-[#2563EB] font-semibold"
+                          onClick={async () => {
+                            const r = await fetch('/api/organizations/switch', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ organizationId: o.id }),
+                            });
+                            if (r.ok) window.location.reload();
+                          }}
+                        >
+                          Switch workspace
+                        </button>
+                      )}
+                      <a className="text-[#2563EB]" href="/settings/organization">
+                        Manage
+                      </a>
+                    </div>
+                  </li>
+                );
+              })}
               {!orgs.length && (
                 <li className="text-slate-500">
                   You are not a member of any organization yet.{' '}

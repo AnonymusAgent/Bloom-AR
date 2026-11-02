@@ -3,13 +3,34 @@ import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { cookies } from 'next/headers';
 import { db } from '@/db';
-import { users, sessions } from '@/db/schema';
+import { users, sessions, organizationMembers, organizations } from '@/db/schema';
 import { eq, and, gt } from 'drizzle-orm';
 import { ensureSaaSColumns } from '@/lib/db-schema';
+import type { User, Session } from '@/db/schema';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'your-secret-key-change-in-production'
-);
+function resolveJwtSecretBytes(): Uint8Array {
+  const configured = process.env.JWT_SECRET;
+  if (configured && configured.length >= 16) {
+    return new TextEncoder().encode(configured);
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.NEXT_PHASE !== 'phase-production-build'
+  ) {
+    throw new Error('JWT_SECRET (>=16 characters) is required in production');
+  }
+  return new TextEncoder().encode(
+    configured || 'dev-only-jwt-secret-bloomar-local-testing-32b'
+  );
+}
+
+const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days absolute
+const MAX_SERVER_IDLE_MS = 8 * 60 * 60 * 1000; // 8 hours server-side idle window
+
+export interface SessionWithUser {
+  session: Session;
+  user: User;
+}
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12);
@@ -19,45 +40,78 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   return bcrypt.compare(password, hash);
 }
 
-export async function createSession(userId: string): Promise<string> {
+export async function createSession(
+  userId: string,
+  options?: {
+    activeOrganizationId?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    mfaVerifiedAt?: Date | null;
+  }
+): Promise<string> {
+  await ensureSaaSColumns();
+
+  let activeOrgId = options?.activeOrganizationId ?? null;
+  if (!activeOrgId) {
+    const memberships = await db
+      .select({
+        organizationId: organizationMembers.organizationId,
+        orgStatus: organizations.status,
+      })
+      .from(organizationMembers)
+      .innerJoin(organizations, eq(organizationMembers.organizationId, organizations.id))
+      .where(and(eq(organizationMembers.userId, userId), eq(organizationMembers.isActive, true)));
+
+    const preferred =
+      memberships.find((m) => m.orgStatus === 'active') || memberships[0] || null;
+    activeOrgId = preferred?.organizationId ?? null;
+  }
+
   const token = await new SignJWT({ userId })
     .setProtectedHeader({ alg: 'HS256' })
     .setJti(randomUUID())
     .setExpirationTime('7d')
     .setIssuedAt()
-    .sign(JWT_SECRET);
+    .sign(resolveJwtSecretBytes());
 
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
   await db.insert(sessions).values({
     userId,
+    activeOrganizationId: activeOrgId,
     token,
+    lastActiveAt: new Date(),
+    ipAddress: options?.ipAddress || null,
+    userAgent: options?.userAgent || null,
+    mfaVerifiedAt: options?.mfaVerifiedAt || null,
     expiresAt,
   });
 
   return token;
 }
 
-export async function verifySession(token: string) {
+export async function verifySessionWithDetails(token: string): Promise<SessionWithUser | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    
+    await jwtVerify(token, resolveJwtSecretBytes());
+    await ensureSaaSColumns();
+
     const [session] = await db
       .select()
       .from(sessions)
-      .where(
-        and(
-          eq(sessions.token, token),
-          gt(sessions.expiresAt, new Date())
-        )
-      )
+      .where(and(eq(sessions.token, token), gt(sessions.expiresAt, new Date())))
       .limit(1);
 
     if (!session) {
       return null;
     }
 
-    await ensureSaaSColumns();
+    const now = Date.now();
+    const lastActiveMs = session.lastActiveAt ? new Date(session.lastActiveAt).getTime() : now;
+    if (now - lastActiveMs > MAX_SERVER_IDLE_MS) {
+      await db.delete(sessions).where(eq(sessions.id, session.id));
+      return null;
+    }
+
     const [user] = await db
       .select()
       .from(users)
@@ -68,28 +122,93 @@ export async function verifySession(token: string) {
       return null;
     }
 
-    return user;
+    if (now - lastActiveMs > 60_000) {
+      await db
+        .update(sessions)
+        .set({ lastActiveAt: new Date() })
+        .where(eq(sessions.id, session.id))
+        .catch(() => {});
+    }
+
+    return { session, user };
   } catch {
     return null;
   }
 }
 
-export async function getCurrentUser() {
+export async function verifySession(token: string) {
+  const details = await verifySessionWithDetails(token);
+  return details ? details.user : null;
+}
+
+export async function getCurrentSessionWithUser(): Promise<SessionWithUser | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get('session')?.value;
+  if (!token) return null;
+  return verifySessionWithDetails(token);
+}
 
-  if (!token) {
-    return null;
+export async function getCurrentUser() {
+  const details = await getCurrentSessionWithUser();
+  if (!details) return null;
+
+  // Bind user.role in-memory to the verified active organization's operational role
+  // so legacy role checks never leak global privileges across tenants.
+  if (details.session.activeOrganizationId) {
+    const [m] = await db
+      .select()
+      .from(organizationMembers)
+      .where(
+        and(
+          eq(organizationMembers.organizationId, details.session.activeOrganizationId),
+          eq(organizationMembers.userId, details.user.id),
+          eq(organizationMembers.isActive, true)
+        )
+      )
+      .limit(1);
+    if (m) {
+      const effectiveRole =
+        m.orgRole === 'owner' || m.orgRole === 'admin'
+          ? ('administrator' as const)
+          : m.orgRole === 'billing_manager' || m.orgRole === 'manager'
+          ? ('manager' as const)
+          : m.operationalRole;
+      return {
+        ...details.user,
+        role: effectiveRole,
+        teamLeadId: m.teamLeadId || details.user.teamLeadId,
+      };
+    }
   }
 
-  return verifySession(token);
+  return details.user;
+}
+
+export async function switchSessionOrganization(
+  sessionId: string,
+  organizationId: string
+): Promise<void> {
+  await db
+    .update(sessions)
+    .set({
+      activeOrganizationId: organizationId,
+      lastActiveAt: new Date(),
+    })
+    .where(eq(sessions.id, sessionId));
 }
 
 export async function logout(token: string) {
   await db.delete(sessions).where(eq(sessions.token, token));
 }
 
-export type UserRole = 'administrator' | 'supervisor' | 'manager' | 'senior_lead' | 'team_lead' | 'ar_executive' | 'billing_user';
+export type UserRole =
+  | 'administrator'
+  | 'supervisor'
+  | 'manager'
+  | 'senior_lead'
+  | 'team_lead'
+  | 'ar_executive'
+  | 'billing_user';
 
 export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   administrator: [

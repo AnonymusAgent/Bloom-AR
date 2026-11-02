@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { claims } from '@/db/schema';
-import { eq } from 'drizzle-orm';
-import { getCurrentUser, isSupervisorOrAbove } from '@/lib/auth';
+import { and, eq } from 'drizzle-orm';
+import { isSupervisorOrAbove } from '@/lib/auth';
 import { getUserAuthorizedPracticeIds, canViewUser } from '@/lib/rbac';
 import { cleanUuid } from '@/lib/sanitize';
 import { analyzeClaimCoding } from '@/lib/coding/coding-checker';
+import { requireTenantContext } from '@/lib/tenant-context';
 
 interface ScrubResult {
   ruleId: string;
@@ -16,7 +17,10 @@ interface ScrubResult {
   message: string;
 }
 
-function scrubClaim(claim: Record<string, unknown>): { totalRules: number; results: ScrubResult[] } {
+function scrubClaim(claim: Record<string, unknown>): {
+  totalRules: number;
+  results: ScrubResult[];
+} {
   const results: ScrubResult[] = [];
   const add = (
     id: string,
@@ -29,49 +33,121 @@ function scrubClaim(claim: Record<string, unknown>): { totalRules: number; resul
     results.push({ ruleId: id, ruleName: name, category: cat, severity: sev, field, message: msg });
   };
 
-  // === PATIENT RULES ===
   if (!claim.patientName)
-    add('PAT-001', 'Missing Patient Name', 'Patient', 'error', 'patientName', 'Patient name is required for claim submission');
+    add(
+      'PAT-001',
+      'Missing Patient Name',
+      'Patient',
+      'error',
+      'patientName',
+      'Patient name is required for claim submission'
+    );
   if (!claim.patientId && !claim.patientName)
-    add('PAT-002', 'No Patient Record', 'Patient', 'warning', 'patientId', 'Claim is not linked to a patient record. Consider creating a patient record.');
+    add(
+      'PAT-002',
+      'No Patient Record',
+      'Patient',
+      'warning',
+      'patientId',
+      'Claim is not linked to a patient record. Consider creating a patient record.'
+    );
 
-  // === INSURANCE RULES ===
   if (!claim.insurance && !claim.payer)
-    add('INS-001', 'Missing Insurance/Payer', 'Insurance', 'error', 'insurance', 'Insurance or payer information is required');
+    add(
+      'INS-001',
+      'Missing Insurance/Payer',
+      'Insurance',
+      'error',
+      'insurance',
+      'Insurance or payer information is required'
+    );
 
-  // === CLAIM RULES ===
   if (!claim.dateOfService)
-    add('CLM-001', 'Missing Date of Service', 'Claim', 'error', 'dateOfService', 'Date of service is required');
+    add(
+      'CLM-001',
+      'Missing Date of Service',
+      'Claim',
+      'error',
+      'dateOfService',
+      'Date of service is required'
+    );
   if (claim.dateOfService) {
     const dos = new Date(String(claim.dateOfService));
     const now = new Date();
     if (dos > now)
-      add('CLM-002', 'Future Date of Service', 'Claim', 'error', 'dateOfService', 'Date of service cannot be in the future');
+      add(
+        'CLM-002',
+        'Future Date of Service',
+        'Claim',
+        'error',
+        'dateOfService',
+        'Date of service cannot be in the future'
+      );
     const oneYear = new Date();
     oneYear.setFullYear(oneYear.getFullYear() - 1);
     if (dos < oneYear)
-      add('CLM-003', 'Old Date of Service', 'Claim', 'warning', 'dateOfService', 'Date of service is more than 1 year ago. Check timely filing requirements.');
+      add(
+        'CLM-003',
+        'Old Date of Service',
+        'Claim',
+        'warning',
+        'dateOfService',
+        'Date of service is more than 1 year ago. Check timely filing requirements.'
+      );
   }
   if (!claim.provider)
-    add('CLM-004', 'Missing Provider', 'Claim', 'warning', 'provider', 'Provider/rendering provider information is missing');
+    add(
+      'CLM-004',
+      'Missing Provider',
+      'Claim',
+      'warning',
+      'provider',
+      'Provider/rendering provider information is missing'
+    );
   if (!claim.claimNumber)
-    add('CLM-005', 'Missing Claim Number', 'Claim', 'error', 'claimNumber', 'Claim number/identifier is required');
+    add(
+      'CLM-005',
+      'Missing Claim Number',
+      'Claim',
+      'error',
+      'claimNumber',
+      'Claim number/identifier is required'
+    );
 
-  // === FINANCIAL & CHARGE RULES ===
   if (!claim.billedAmount || parseFloat(String(claim.billedAmount)) <= 0)
-    add('COD-002', 'Invalid Charge Amount', 'Coding', 'error', 'billedAmount', 'Billed amount must be greater than zero');
+    add(
+      'COD-002',
+      'Invalid Charge Amount',
+      'Coding',
+      'error',
+      'billedAmount',
+      'Billed amount must be greater than zero'
+    );
   if (claim.billedAmount && parseFloat(String(claim.billedAmount)) > 100000)
-    add('COD-003', 'Unusually High Charge', 'Coding', 'warning', 'billedAmount', 'Billed amount is unusually high. Please verify.');
+    add(
+      'COD-003',
+      'Unusually High Charge',
+      'Coding',
+      'warning',
+      'billedAmount',
+      'Billed amount is unusually high. Please verify.'
+    );
 
   if (
     claim.paidAmount &&
     claim.billedAmount &&
     parseFloat(String(claim.paidAmount)) > parseFloat(String(claim.billedAmount))
   ) {
-    add('CON-001', 'Overpayment Detected', 'Consistency', 'warning', 'paidAmount', 'Paid amount exceeds billed amount');
+    add(
+      'CON-001',
+      'Overpayment Detected',
+      'Consistency',
+      'warning',
+      'paidAmount',
+      'Paid amount exceeds billed amount'
+    );
   }
 
-  // === INTEGRATED FY2027 ICD-10-CM / CPT / NCCI / LATERALITY SCRUBBER ===
   const codingAudit = analyzeClaimCoding({
     diagnosisCodes: claim.diagnosisCode as string | null,
     cptCodes: claim.cptCodes as string | null,
@@ -97,46 +173,71 @@ function scrubClaim(claim: Record<string, unknown>): { totalRules: number; resul
   return { totalRules, results };
 }
 
-export async function POST(
-  request: NextRequest,
+async function handleScrub(params: Promise<{ id: string }>) {
+  const auth = await requireTenantContext();
+  if (!auth.ok) return auth.response;
+  const { ctx } = auth;
+  const { user, organizationId } = ctx;
+
+  const { id: rawId } = await params;
+  const id = cleanUuid(rawId);
+  if (!id) return NextResponse.json({ error: 'Invalid claim ID' }, { status: 400 });
+
+  const [claim] = await db
+    .select()
+    .from(claims)
+    .where(and(eq(claims.id, id), eq(claims.organizationId, organizationId)))
+    .limit(1);
+  if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
+
+  if (!ctx.isReadOnly && !isSupervisorOrAbove(user.role)) {
+    const authPractices = await getUserAuthorizedPracticeIds(user, organizationId);
+    const allowedByPractice =
+      authPractices === 'all' ||
+      (claim.practiceId ? authPractices.includes(claim.practiceId) : false);
+    const allowedByAssignee = claim.assignedTo
+      ? await canViewUser(user, claim.assignedTo, organizationId)
+      : false;
+    if (!allowedByPractice && !allowedByAssignee) {
+      return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+    }
+  }
+
+  const { totalRules, results } = scrubClaim(claim as Record<string, unknown>);
+  const errors = results.filter((r) => r.severity === 'error');
+  const warnings = results.filter((r) => r.severity === 'warning');
+  const passed = Math.max(0, totalRules - results.length);
+
+  return NextResponse.json({
+    claimId: id,
+    claimNumber: claim.claimNumber,
+    totalRules,
+    passed,
+    errors: errors.length,
+    warnings: warnings.length,
+    canSubmit: errors.length === 0,
+    results,
+  });
+}
+
+export async function GET(
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const user = await getCurrentUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    const { id: rawId } = await params;
-    const id = cleanUuid(rawId);
-    if (!id) return NextResponse.json({ error: 'Invalid claim ID' }, { status: 400 });
+    return await handleScrub(params);
+  } catch (error) {
+    console.error('Scrub error:', error);
+    return NextResponse.json({ error: 'Failed to scrub claim' }, { status: 500 });
+  }
+}
 
-    const [claim] = await db.select().from(claims).where(eq(claims.id, id)).limit(1);
-    if (!claim) return NextResponse.json({ error: 'Claim not found' }, { status: 404 });
-
-    if (!isSupervisorOrAbove(user.role)) {
-      const authPractices = await getUserAuthorizedPracticeIds(user);
-      const allowedByPractice =
-        authPractices === 'all' ||
-        (claim.practiceId ? authPractices.includes(claim.practiceId) : false);
-      const allowedByAssignee = claim.assignedTo ? await canViewUser(user, claim.assignedTo) : false;
-      if (!allowedByPractice && !allowedByAssignee) {
-        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
-      }
-    }
-
-    const { totalRules, results } = scrubClaim(claim as Record<string, unknown>);
-    const errors = results.filter((r) => r.severity === 'error');
-    const warnings = results.filter((r) => r.severity === 'warning');
-    const passed = Math.max(0, totalRules - results.length);
-
-    return NextResponse.json({
-      claimId: id,
-      claimNumber: claim.claimNumber,
-      totalRules,
-      passed,
-      errors: errors.length,
-      warnings: warnings.length,
-      canSubmit: errors.length === 0,
-      results,
-    });
+export async function POST(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    return await handleScrub(params);
   } catch (error) {
     console.error('Scrub error:', error);
     return NextResponse.json({ error: 'Failed to scrub claim' }, { status: 500 });

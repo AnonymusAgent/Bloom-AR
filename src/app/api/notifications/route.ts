@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { notifications } from '@/db/schema';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { eq, desc, and, sql, or, isNull } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth';
+import { resolveTenantContext } from '@/lib/tenant-context';
 
 export async function GET(request: NextRequest) {
   try {
@@ -11,12 +12,19 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const tenant = await resolveTenantContext();
+    const activeOrgId = tenant.status === 'ok' ? tenant.ctx.organizationId : null;
+
     const searchParams = request.nextUrl.searchParams;
     const unreadOnly = searchParams.get('unreadOnly') === 'true';
-    const limit = parseInt(searchParams.get('limit') || '20');
+    const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '20') || 20, 1), 100);
 
-    const conditions = [eq(notifications.userId, user.id)];
-    
+    const orgScope = activeOrgId
+      ? or(eq(notifications.organizationId, activeOrgId), isNull(notifications.organizationId))!
+      : isNull(notifications.organizationId);
+
+    const conditions = [eq(notifications.userId, user.id), orgScope];
+
     if (unreadOnly) {
       conditions.push(eq(notifications.isRead, false));
     }
@@ -28,14 +36,10 @@ export async function GET(request: NextRequest) {
       .orderBy(desc(notifications.createdAt))
       .limit(limit);
 
-    // Get unread count
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(notifications)
-      .where(and(
-        eq(notifications.userId, user.id),
-        eq(notifications.isRead, false)
-      ));
+      .where(and(eq(notifications.userId, user.id), orgScope, eq(notifications.isRead, false)));
 
     return NextResponse.json({
       notifications: result,
@@ -43,9 +47,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Get notifications error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch notifications' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch notifications' }, { status: 500 });
   }
 }
