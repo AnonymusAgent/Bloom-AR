@@ -134,6 +134,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "denial_codes_global_code_uidx" ON "denial_cod
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "denial_codes_org_code_uidx" ON "denial_codes"("organization_id", "code") WHERE "organization_id" IS NOT NULL;
 --> statement-breakpoint
+ALTER TABLE "site_settings" DROP CONSTRAINT IF EXISTS "site_settings_updated_by_fkey";
+--> statement-breakpoint
+ALTER TABLE "site_settings" DROP CONSTRAINT IF EXISTS "site_settings_updated_by_users_id_fk";
+--> statement-breakpoint
+ALTER TABLE "site_settings" ADD CONSTRAINT "site_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "users"("id") ON DELETE SET NULL;
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "claims_org_status_idx" ON "claims"("organization_id", "status", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "claims_org_claim_number_idx" ON "claims"("organization_id", "claim_number");

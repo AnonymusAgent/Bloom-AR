@@ -1158,7 +1158,7 @@ export const processedWebhooks = pgTable('processed_webhooks', {
 export const siteSettings = pgTable('site_settings', {
   key: varchar('key', { length: 100 }).primaryKey(),
   value: jsonb('value').notNull(),
-  updatedBy: uuid('updated_by').references(() => users.id),
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 export type SiteSetting = typeof siteSettings.$inferSelect;

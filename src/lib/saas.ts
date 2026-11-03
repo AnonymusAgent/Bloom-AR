@@ -78,19 +78,22 @@ export const rootDomain = () => process.env.NEXT_PUBLIC_ROOT_DOMAIN || '';
 export async function ensureDefaultPlans() {
   const existing = await db.select().from(plans);
   if (existing.length) return existing;
-  await db.insert(plans).values(
-    DEFAULT_PLAN_CATALOG.map((p, idx) => ({
-      slug: p.slug,
-      name: p.name,
-      description: p.description,
-      monthlyPriceCents: p.monthlyPriceCents,
-      annualPriceCents: p.annualPriceCents,
-      trialDays: p.trialDays,
-      features: p.features,
-      limits: p.limits,
-      sortOrder: idx,
-    })) as never
-  );
+  await db
+    .insert(plans)
+    .values(
+      DEFAULT_PLAN_CATALOG.map((p, idx) => ({
+        slug: p.slug,
+        name: p.name,
+        description: p.description,
+        monthlyPriceCents: p.monthlyPriceCents,
+        annualPriceCents: p.annualPriceCents,
+        trialDays: p.trialDays,
+        features: p.features,
+        limits: p.limits,
+        sortOrder: idx,
+      })) as never
+    )
+    .onConflictDoNothing({ target: plans.slug });
   return db.select().from(plans);
 }
 
