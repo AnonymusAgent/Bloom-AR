@@ -10,6 +10,8 @@ import {
   verifyTotpCode,
   generateRecoveryCodes,
   buildOtpAuthUri,
+  formatSetupKey,
+  generateMfaQrDataUrl,
 } from '@/lib/mfa';
 import { createAuditLog, AUDIT_ACTIONS } from '@/lib/audit';
 
@@ -43,9 +45,11 @@ export async function POST(req: NextRequest) {
   const action = String(body.action || '');
 
   if (action === 'setup') {
+    const issuer = 'BloomAR Manager';
     const secret = generateTotpSecret();
     const encrypted = encryptMfaSecret(secret);
-    const otpauthUri = buildOtpAuthUri(user.email, secret);
+    const otpauthUri = buildOtpAuthUri(user.email, secret, issuer);
+    const qrCodeDataUrl = await generateMfaQrDataUrl(otpauthUri);
 
     const [existing] = await db
       .select()
@@ -76,7 +80,55 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       secret,
+      formattedSecret: formatSetupKey(secret),
+      issuer,
+      accountName: user.email,
       otpauthUri,
+      qrCodeDataUrl,
+    });
+  }
+
+  if (action === 'regenerate_recovery_codes') {
+    const password = String(body.password || '');
+    if (!password) {
+      return NextResponse.json(
+        { error: 'Current account password is required to regenerate recovery codes.' },
+        { status: 400 }
+      );
+    }
+    const ok = await verifyPassword(password, user.passwordHash);
+    if (!ok) {
+      return NextResponse.json({ error: 'Incorrect password.' }, { status: 401 });
+    }
+    const [mfa] = await db.select().from(userMfa).where(eq(userMfa.userId, user.id)).limit(1);
+    if (!mfa?.isEnabled) {
+      return NextResponse.json(
+        { error: 'MFA must be enabled before regenerating recovery codes.' },
+        { status: 400 }
+      );
+    }
+
+    const recovery = generateRecoveryCodes(8);
+    await db
+      .update(userMfa)
+      .set({
+        backupCodeHashes: recovery.hashes,
+        updatedAt: new Date(),
+      })
+      .where(eq(userMfa.userId, user.id));
+
+    await createAuditLog({
+      organizationId: session.activeOrganizationId || null,
+      userId: user.id,
+      action: AUDIT_ACTIONS.MFA_ENABLED,
+      entityType: 'user_mfa',
+      entityId: user.id,
+      newValue: { event: 'recovery_codes_regenerated' },
+    });
+
+    return NextResponse.json({
+      success: true,
+      recoveryCodes: recovery.plain,
     });
   }
 

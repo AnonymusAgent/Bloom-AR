@@ -10,6 +10,9 @@ import {
   decryptMfaSecret,
   generateRecoveryCodes,
   hashRecoveryCode,
+  buildOtpAuthUri,
+  formatSetupKey,
+  generateMfaQrDataUrl,
 } from '../src/lib/mfa.ts';
 import {
   DRIZZLE_MIGRATIONS,
@@ -105,10 +108,28 @@ test('all operational API routes enforce requireTenantContext and explicit organ
   }
 });
 
-test('RFC 6238 TOTP MFA encryption, code verification, and recovery codes work end-to-end', () => {
+test('RFC 6238 TOTP MFA encryption, QR code generation, code verification, and recovery codes work end-to-end', async () => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-jwt-secret-32-chars-minimum!!';
   const secret = generateTotpSecret();
   assert.ok(secret.length >= 24);
+
+  const formatted = formatSetupKey(secret);
+  assert.match(formatted, /^[A-Z2-7]{4}(\s[A-Z2-7]{1,4})+$/);
+
+  const otpauthUri = buildOtpAuthUri('clinician@example.invalid', secret, 'BloomAR Manager');
+  assert.ok(otpauthUri.startsWith('otpauth://totp/BloomAR%20Manager:clinician%40example.invalid?'));
+  assert.equal(otpauthUri.includes('BloomAR+Manager'), false, 'issuer must use %20 encoding for Google Authenticator');
+
+  const qrDataUrl = await generateMfaQrDataUrl(otpauthUri);
+  assert.ok(qrDataUrl.startsWith('data:image/png;base64,'), 'QR code must be generated locally as a PNG data URL');
+  assert.ok(qrDataUrl.length > 500, 'QR code PNG payload must be non-empty');
+
+  const accountPageSrc = fs.readFileSync(path.join(ROOT, 'src/app/settings/account/page.tsx'), 'utf8');
+  const profilePageSrc = fs.readFileSync(path.join(ROOT, 'src/app/profile/page.tsx'), 'utf8');
+  const mfaCardSrc = fs.readFileSync(path.join(ROOT, 'src/components/security/MfaAuthenticatorCard.tsx'), 'utf8');
+  assert.ok(accountPageSrc.includes('MfaAuthenticatorCard'), 'Account Settings must render MfaAuthenticatorCard');
+  assert.ok(profilePageSrc.includes('MfaAuthenticatorCard'), 'Profile Security tab must render MfaAuthenticatorCard');
+  assert.ok(mfaCardSrc.includes('setup.qrCodeDataUrl'), 'MfaAuthenticatorCard must render QR code image');
 
   const encrypted = encryptMfaSecret(secret);
   assert.notEqual(encrypted, secret);
