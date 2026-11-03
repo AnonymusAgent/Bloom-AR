@@ -277,6 +277,12 @@ test('Migration 0006 upgrades site_settings.updated_by FK to ON DELETE SET NULL 
     const cmsRow = await pg.query(`SELECT key, updated_by FROM site_settings WHERE key = 'cms_landing'`);
     assert.equal(cmsRow.rows.length, 1);
     assert.equal(cmsRow.rows[0].updated_by, null);
+
+    // 4. Verify tenant-bootstrap purges claims BEFORE uploaded_files (claims.uploaded_file_id FK)
+    const bootstrapSrc = fs.readFileSync(path.join(ROOT, 'src/lib/tenant-bootstrap.ts'), 'utf8');
+    const deleteClaimsIdx = bootstrapSrc.indexOf('DELETE FROM claims');
+    const deleteUploadedFilesIdx = bootstrapSrc.indexOf('DELETE FROM uploaded_files');
+    assert.ok(deleteClaimsIdx > 0 && deleteUploadedFilesIdx > deleteClaimsIdx, 'claims must be deleted before uploaded_files');
   } finally {
     await pg.close();
   }

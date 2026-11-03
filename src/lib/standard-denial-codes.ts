@@ -1,9 +1,17 @@
 import { db } from '@/db';
 import { denialCodes } from '@/db/schema';
-import { isNull } from 'drizzle-orm';
+import { isNull, sql } from 'drizzle-orm';
 import { ALL_DENIAL_CODES } from '@/lib/denial-codes-data';
 
 export async function ensureStandardDenialCodes(): Promise<{ inserted: number; skipped: number }> {
+  try {
+    await db.execute(
+      sql`SELECT setval(pg_get_serial_sequence('denial_codes', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM denial_codes), 0), 1), (SELECT COUNT(*) > 0 FROM denial_codes))`
+    );
+  } catch {
+    // Sequence sync is best-effort
+  }
+
   const existingGlobal = await db
     .select({ id: denialCodes.id, code: denialCodes.code })
     .from(denialCodes)
