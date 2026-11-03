@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import QRCode from 'qrcode';
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -115,14 +116,31 @@ export function hashRecoveryCode(code: string): string {
   return crypto.createHash('sha256').update(`bloomar-recovery:${normalized}`).digest('hex');
 }
 
-export function buildOtpAuthUri(email: string, secretBase32: string, issuer = 'BloomAR Manager'): string {
-  const label = encodeURIComponent(`${issuer}:${email}`);
-  const params = new URLSearchParams({
-    secret: secretBase32,
-    issuer,
-    algorithm: 'SHA1',
-    digits: '6',
-    period: '30',
+export function formatSetupKey(secretBase32: string): string {
+  const cleaned = String(secretBase32 || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+  return cleaned.match(/.{1,4}/g)?.join(' ') || cleaned;
+}
+
+export function buildOtpAuthUri(
+  email: string,
+  secretBase32: string,
+  issuer = 'BloomAR Manager'
+): string {
+  const encIssuer = encodeURIComponent(issuer);
+  const encAccount = encodeURIComponent(email.trim().toLowerCase());
+  return `otpauth://totp/${encIssuer}:${encAccount}?secret=${encodeURIComponent(
+    secretBase32
+  )}&issuer=${encIssuer}&algorithm=SHA1&digits=6&period=30`;
+}
+
+export async function generateMfaQrDataUrl(otpauthUri: string): Promise<string> {
+  return QRCode.toDataURL(otpauthUri, {
+    errorCorrectionLevel: 'M',
+    margin: 2,
+    width: 240,
+    color: {
+      dark: '#0F2D52',
+      light: '#FFFFFF',
+    },
   });
-  return `otpauth://totp/${label}?${params.toString()}`;
 }

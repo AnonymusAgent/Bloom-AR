@@ -6,6 +6,7 @@ import { AppLayout } from '@/components/layout/AppLayout';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { MfaAuthenticatorCard } from '@/components/security/MfaAuthenticatorCard';
 import {
   User,
   Shield,
@@ -768,6 +769,8 @@ function ProfileContent() {
         {activeTab === 'security' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="md:col-span-2 space-y-6">
+              <MfaAuthenticatorCard />
+
               <Card>
                 <CardHeader
                   title="Change Password"
