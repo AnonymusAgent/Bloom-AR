@@ -634,16 +634,19 @@ export async function runTenantBootstrapFromConfig(config: TenantBootstrapConfig
       await db.execute(sql`DELETE FROM chat_channels`);
       await db.execute(sql`DELETE FROM ocr_scans`);
       await db.execute(sql`DELETE FROM e_signatures`);
+      await db.execute(sql`DELETE FROM notifications`);
       await db.execute(sql`DELETE FROM claim_notes`);
       await db.execute(sql`DELETE FROM claim_documents`);
       await db.execute(sql`DELETE FROM claim_status_history`);
-      await db.execute(sql`DELETE FROM uploaded_files`);
+      await db.execute(
+        sql`UPDATE claims SET uploaded_file_id = NULL, patient_id = NULL, practice_id = NULL, denial_code_id = NULL`
+      );
       await db.execute(sql`DELETE FROM claims`);
+      await db.execute(sql`DELETE FROM uploaded_files`);
       await db.execute(sql`DELETE FROM patients`);
       await db.execute(sql`DELETE FROM user_practice_assignments`);
       await db.execute(sql`DELETE FROM user_responsibilities`);
       await db.execute(sql`DELETE FROM practices`);
-      await db.execute(sql`DELETE FROM notifications`);
       await db.execute(sql`DELETE FROM audit_logs`);
       await db.execute(sql`DELETE FROM billing_invoices`);
       await db.execute(sql`DELETE FROM subscriptions`);
@@ -690,7 +693,13 @@ export async function runTenantBootstrapFromConfig(config: TenantBootstrapConfig
         .from(organizations)
         .where(eq(organizations.slug, orgSlug));
       if (existingOrg) {
+        await db.execute(sql`DELETE FROM payment_allocations WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM payments WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM era_transactions WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM era_files WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM billing_tasks WHERE organization_id = ${existingOrg.id}`);
         await db.execute(sql`DELETE FROM claims WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM uploaded_files WHERE organization_id = ${existingOrg.id}`);
         await db.execute(sql`DELETE FROM practices WHERE organization_id = ${existingOrg.id}`);
         await db.execute(sql`DELETE FROM patients WHERE organization_id = ${existingOrg.id}`);
         await db.delete(organizations).where(eq(organizations.id, existingOrg.id));
@@ -1407,14 +1416,19 @@ export async function runEnvTenantBootstrapIfNeeded(): Promise<EnvBootstrapStatu
       applied: res.applied,
     };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const baseMsg = err instanceof Error ? err.message : String(err);
+    const cause = (err as { cause?: { message?: string; detail?: string; constraint?: string } })?.cause;
+    const causeMsg = cause?.message
+      ? ` (${cause.message}${cause.constraint ? ` [${cause.constraint}]` : ''})`
+      : '';
+    const detail = `${baseMsg}${causeMsg}`;
     console.error('[tenant-bootstrap] Failed to apply TENANT_BOOTSTRAP_CONFIG:', err);
     return {
       configured: true,
       ok: false,
       version: null,
       applied: false,
-      error: detail.replace(/postgres(ql)?:\/\/\S+/gi, '[database-url]').slice(0, 240),
+      error: detail.replace(/postgres(ql)?:\/\/\S+/gi, '[database-url]').slice(0, 280),
     };
   }
 }
