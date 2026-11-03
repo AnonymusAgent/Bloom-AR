@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { db } from '@/db';
+import { Pool, type PoolClient } from 'pg';
+import { db, pool as runtimePool } from '@/db';
+import { buildPgPoolConfig, resolveRuntimeDatabaseUrl } from '@/db/pg-config';
 import {
   organizations,
   organizationMembers,
@@ -8,6 +10,7 @@ import {
   billingInvoices,
   plans,
   users,
+  userMfa,
   practices,
   patients,
   claims,
@@ -492,6 +495,104 @@ function getProfileSeedData(profile: 'cardiology' | 'orthopedics') {
   };
 }
 
+async function acquireBootstrapLock(): Promise<{ release: () => Promise<void> }> {
+  const runtimeUrl = resolveRuntimeDatabaseUrl();
+  let dedicatedPool: Pool | null = null;
+  let client: PoolClient | null = null;
+  let locked = false;
+
+  if (runtimeUrl) {
+    try {
+      dedicatedPool = new Pool(buildPgPoolConfig(runtimeUrl, { direct: true, max: 1 }));
+      client = await dedicatedPool.connect();
+    } catch {
+      if (dedicatedPool) {
+        await dedicatedPool.end().catch(() => {});
+        dedicatedPool = null;
+      }
+    }
+  }
+
+  if (!client) {
+    try {
+      client = await runtimePool.connect();
+    } catch {
+      client = null;
+    }
+  }
+
+  if (client) {
+    try {
+      await client.query('SELECT pg_advisory_lock(82437002)');
+      locked = true;
+    } catch {
+      locked = false;
+    }
+  }
+
+  return {
+    release: async () => {
+      if (client) {
+        if (locked) {
+          await client.query('SELECT pg_advisory_unlock(82437002)').catch(() => {});
+        }
+        client.release();
+      }
+      if (dedicatedPool) {
+        await dedicatedPool.end().catch(() => {});
+      }
+    },
+  };
+}
+
+async function clearRemainingUserForeignKeys(): Promise<void> {
+  try {
+    await db.execute(sql`
+      DO $$
+      DECLARE
+        rec record;
+      BEGIN
+        FOR rec IN
+          SELECT
+            ns.nspname AS schema_name,
+            cls.relname AS table_name,
+            att.attname AS column_name,
+            att.attnotnull AS is_not_null
+          FROM pg_constraint con
+          JOIN pg_class cls ON cls.oid = con.conrelid
+          JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+          JOIN pg_attribute att ON att.attrelid = cls.oid AND att.attnum = con.conkey[1]
+          WHERE con.contype = 'f'
+            AND con.confrelid = 'public.users'::regclass
+            AND array_length(con.conkey, 1) = 1
+            AND ns.nspname = 'public'
+        LOOP
+          IF rec.table_name = 'users' THEN
+            EXECUTE format('UPDATE %I.%I SET %I = NULL', rec.schema_name, rec.table_name, rec.column_name);
+          ELSIF rec.is_not_null THEN
+            EXECUTE format(
+              'DELETE FROM %I.%I WHERE %I IN (SELECT id FROM public.users WHERE is_platform_admin = false)',
+              rec.schema_name,
+              rec.table_name,
+              rec.column_name
+            );
+          ELSE
+            EXECUTE format(
+              'UPDATE %I.%I SET %I = NULL WHERE %I IN (SELECT id FROM public.users WHERE is_platform_admin = false)',
+              rec.schema_name,
+              rec.table_name,
+              rec.column_name,
+              rec.column_name
+            );
+          END IF;
+        END LOOP;
+      END $$;
+    `);
+  } catch {
+    // Individual table statements above already cover standard schema tables.
+  }
+}
+
 export async function runTenantBootstrapFromConfig(config: TenantBootstrapConfig): Promise<{
   applied: boolean;
   version: string;
@@ -501,106 +602,150 @@ export async function runTenantBootstrapFromConfig(config: TenantBootstrapConfig
     return { applied: false, version: 'none', organizationsCreated: [] };
   }
 
-  const [existingSetting] = await db
-    .select()
-    .from(siteSettings)
-    .where(eq(siteSettings.key, 'tenant_bootstrap_version'));
+  const lock = await acquireBootstrapLock();
+  try {
+    const [existingSetting] = await db
+      .select()
+      .from(siteSettings)
+      .where(eq(siteSettings.key, 'tenant_bootstrap_version'));
 
-  const currentVersion = (existingSetting?.value as { version?: string } | undefined)?.version;
-  if (currentVersion === config.version) {
-    return { applied: false, version: config.version, organizationsCreated: [] };
-  }
-
-  if (config.purgeLegacyDemoData) {
-    await db.execute(sql`DELETE FROM payment_allocations`);
-    await db.execute(sql`DELETE FROM payments`);
-    await db.execute(sql`DELETE FROM era_transactions`);
-    await db.execute(sql`DELETE FROM era_files`);
-    await db.execute(sql`DELETE FROM denial_analyses`);
-    await db.execute(sql`DELETE FROM signoffs`);
-    await db.execute(sql`DELETE FROM task_documents`);
-    await db.execute(sql`DELETE FROM task_notes`);
-    await db.execute(sql`DELETE FROM task_status_history`);
-    await db.execute(sql`DELETE FROM billing_tasks`);
-    await db.execute(sql`DELETE FROM auth_documents`);
-    await db.execute(sql`DELETE FROM authorizations`);
-    await db.execute(sql`DELETE FROM coding_documents`);
-    await db.execute(sql`DELETE FROM coding_requests`);
-    await db.execute(sql`DELETE FROM chat_messages`);
-    await db.execute(sql`DELETE FROM chat_members`);
-    await db.execute(sql`DELETE FROM chat_channels`);
-    await db.execute(sql`DELETE FROM ocr_scans`);
-    await db.execute(sql`DELETE FROM e_signatures`);
-    await db.execute(sql`DELETE FROM claim_notes`);
-    await db.execute(sql`DELETE FROM claim_documents`);
-    await db.execute(sql`DELETE FROM claim_status_history`);
-    await db.execute(sql`DELETE FROM uploaded_files`);
-    await db.execute(sql`DELETE FROM claims`);
-    await db.execute(sql`DELETE FROM patients`);
-    await db.execute(sql`DELETE FROM user_practice_assignments`);
-    await db.execute(sql`DELETE FROM user_responsibilities`);
-    await db.execute(sql`DELETE FROM practices`);
-    await db.execute(sql`DELETE FROM notifications`);
-    await db.execute(sql`DELETE FROM audit_logs`);
-    await db.execute(sql`DELETE FROM billing_invoices`);
-    await db.execute(sql`DELETE FROM subscriptions`);
-    await db.execute(sql`DELETE FROM api_keys`);
-    await db.execute(sql`DELETE FROM organization_domains`);
-    await db.execute(sql`DELETE FROM organization_invitations`);
-    await db.execute(sql`DELETE FROM organization_members`);
-    await db.execute(sql`DELETE FROM sessions`);
-    await db.execute(sql`DELETE FROM organizations`);
-    await db.execute(sql`DELETE FROM denial_codes WHERE organization_id IS NOT NULL`);
-    await db.execute(sql`DELETE FROM users WHERE is_platform_admin = false`);
-  }
-
-  await ensureDefaultPlans();
-  await ensureStandardDenialCodes();
-
-  const allPlans = await db.select().from(plans);
-  const globalDenialCodes = await db
-    .select()
-    .from(denialCodes)
-    .where(isNull(denialCodes.organizationId));
-  const denialCodeByCode = new Map(globalDenialCodes.map((d) => [d.code, d.id]));
-
-  const createdOrgs: string[] = [];
-
-  for (const orgSpec of config.organizations) {
-    const orgSlug = slugify(orgSpec.slug || orgSpec.name);
-    const primaryEmail = orgSpec.members[0]?.email?.toLowerCase().trim() || null;
-
-    // Create organization users first so ownerUserId is immediately set
-    const createdUsers: Array<typeof users.$inferSelect> = [];
-    for (const m of orgSpec.members) {
-      const normalizedEmail = m.email.toLowerCase().trim();
-      const opRole = mapOrgRoleToOperationalRole(m.orgRole, m.operationalRole);
-      const pwHash = await bcrypt.hash(m.password, 12);
-
-      const [existingUser] = await db
-        .select()
-        .from(users)
-        .where(eq(users.email, normalizedEmail));
-
-      let userRow = existingUser;
-      if (!userRow) {
-        const [inserted] = await db
-          .insert(users)
-          .values({
-            email: normalizedEmail,
-            passwordHash: pwHash,
-            firstName: m.firstName,
-            lastName: m.lastName,
-            role: opRole,
-            isActive: true,
-            emailVerifiedAt: new Date(),
-            accountStatus: 'active',
-          })
-          .returning();
-        userRow = inserted;
-      }
-      createdUsers.push(userRow);
+    const currentVersion = (existingSetting?.value as { version?: string } | undefined)?.version;
+    if (currentVersion === config.version) {
+      return { applied: false, version: config.version, organizationsCreated: [] };
     }
+
+    if (config.purgeLegacyDemoData) {
+      await db.execute(sql`DELETE FROM payment_allocations`);
+      await db.execute(sql`DELETE FROM payments`);
+      await db.execute(sql`DELETE FROM era_transactions`);
+      await db.execute(sql`DELETE FROM era_files`);
+      await db.execute(sql`DELETE FROM denial_analyses`);
+      await db.execute(sql`DELETE FROM signoffs`);
+      await db.execute(sql`DELETE FROM task_documents`);
+      await db.execute(sql`DELETE FROM task_notes`);
+      await db.execute(sql`DELETE FROM task_status_history`);
+      await db.execute(sql`DELETE FROM billing_tasks`);
+      await db.execute(sql`DELETE FROM auth_documents`);
+      await db.execute(sql`DELETE FROM authorizations`);
+      await db.execute(sql`DELETE FROM coding_documents`);
+      await db.execute(sql`DELETE FROM coding_requests`);
+      await db.execute(sql`DELETE FROM chat_messages`);
+      await db.execute(sql`DELETE FROM chat_members`);
+      await db.execute(sql`DELETE FROM chat_channels`);
+      await db.execute(sql`DELETE FROM ocr_scans`);
+      await db.execute(sql`DELETE FROM e_signatures`);
+      await db.execute(sql`DELETE FROM claim_notes`);
+      await db.execute(sql`DELETE FROM claim_documents`);
+      await db.execute(sql`DELETE FROM claim_status_history`);
+      await db.execute(sql`DELETE FROM uploaded_files`);
+      await db.execute(sql`DELETE FROM claims`);
+      await db.execute(sql`DELETE FROM patients`);
+      await db.execute(sql`DELETE FROM user_practice_assignments`);
+      await db.execute(sql`DELETE FROM user_responsibilities`);
+      await db.execute(sql`DELETE FROM practices`);
+      await db.execute(sql`DELETE FROM notifications`);
+      await db.execute(sql`DELETE FROM audit_logs`);
+      await db.execute(sql`DELETE FROM billing_invoices`);
+      await db.execute(sql`DELETE FROM subscriptions`);
+      await db.execute(sql`DELETE FROM api_keys`);
+      await db.execute(sql`DELETE FROM organization_domains`);
+      await db.execute(sql`DELETE FROM organization_invitations`);
+      await db.execute(sql`DELETE FROM organization_members`);
+      await db.execute(sql`DELETE FROM sessions`);
+      await db.execute(sql`DELETE FROM organizations`);
+      await db.execute(sql`DELETE FROM denial_codes WHERE organization_id IS NOT NULL`);
+      await db.execute(sql`DELETE FROM rate_limits`);
+      await db.execute(sql`DELETE FROM leads`);
+      await db.execute(sql`UPDATE site_settings SET updated_by = NULL`);
+      await db.execute(sql`UPDATE users SET team_lead_id = NULL`);
+      await db.execute(
+        sql`DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE is_platform_admin = false)`
+      );
+      await db.execute(
+        sql`DELETE FROM user_mfa WHERE user_id IN (SELECT id FROM users WHERE is_platform_admin = false)`
+      );
+      await clearRemainingUserForeignKeys();
+      await db.execute(sql`DELETE FROM users WHERE is_platform_admin = false`);
+    }
+
+    await ensureDefaultPlans();
+    await ensureStandardDenialCodes();
+
+    const allPlans = await db.select().from(plans);
+    const globalDenialCodes = await db
+      .select()
+      .from(denialCodes)
+      .where(isNull(denialCodes.organizationId));
+    const denialCodeByCode = new Map(globalDenialCodes.map((d) => [d.code, d.id]));
+
+    const createdOrgs: string[] = [];
+
+    for (const orgSpec of config.organizations) {
+      const orgSlug = slugify(orgSpec.slug || orgSpec.name);
+      const primaryEmail = orgSpec.members[0]?.email?.toLowerCase().trim() || null;
+
+      // If an organization with this slug exists from a non-purge or partial run, clean it first
+      const [existingOrg] = await db
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.slug, orgSlug));
+      if (existingOrg) {
+        await db.execute(sql`DELETE FROM claims WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM practices WHERE organization_id = ${existingOrg.id}`);
+        await db.execute(sql`DELETE FROM patients WHERE organization_id = ${existingOrg.id}`);
+        await db.delete(organizations).where(eq(organizations.id, existingOrg.id));
+      }
+
+      // Create or synchronize organization users so credentials always match config
+      const createdUsers: Array<typeof users.$inferSelect> = [];
+      for (const m of orgSpec.members) {
+        const normalizedEmail = m.email.toLowerCase().trim();
+        const opRole = mapOrgRoleToOperationalRole(m.orgRole, m.operationalRole);
+        const pwHash = await bcrypt.hash(m.password, 12);
+
+        const [existingUser] = await db
+          .select()
+          .from(users)
+          .where(eq(users.email, normalizedEmail));
+
+        let userRow = existingUser;
+        if (!userRow) {
+          const [inserted] = await db
+            .insert(users)
+            .values({
+              email: normalizedEmail,
+              passwordHash: pwHash,
+              firstName: m.firstName,
+              lastName: m.lastName,
+              role: opRole,
+              isActive: true,
+              emailVerifiedAt: new Date(),
+              accountStatus: 'active',
+            })
+            .returning();
+          userRow = inserted;
+        } else {
+          const [updated] = await db
+            .update(users)
+            .set({
+              passwordHash: pwHash,
+              firstName: m.firstName,
+              lastName: m.lastName,
+              role: opRole,
+              isActive: true,
+              emailVerifiedAt: existingUser.emailVerifiedAt || new Date(),
+              accountStatus: 'active',
+              updatedAt: new Date(),
+            })
+            .where(eq(users.id, existingUser.id))
+            .returning();
+          userRow = updated;
+          if (config.purgeLegacyDemoData) {
+            await db.delete(userMfa).where(eq(userMfa.userId, existingUser.id));
+          }
+        }
+        createdUsers.push(userRow);
+      }
 
     const ownerUser = createdUsers[0];
     const planSlug = orgSpec.planSlug || 'professional';
@@ -1203,46 +1348,73 @@ export async function runTenantBootstrapFromConfig(config: TenantBootstrapConfig
     });
   }
 
-  await db
-    .insert(siteSettings)
-    .values({
-      key: 'tenant_bootstrap_version',
-      value: {
-        version: config.version,
-        appliedAt: new Date().toISOString(),
-        organizations: createdOrgs,
-      },
-    })
-    .onConflictDoUpdate({
-      target: siteSettings.key,
-      set: {
+    await db
+      .insert(siteSettings)
+      .values({
+        key: 'tenant_bootstrap_version',
         value: {
           version: config.version,
           appliedAt: new Date().toISOString(),
           organizations: createdOrgs,
         },
-        updatedAt: new Date(),
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: siteSettings.key,
+        set: {
+          value: {
+            version: config.version,
+            appliedAt: new Date().toISOString(),
+            organizations: createdOrgs,
+          },
+          updatedAt: new Date(),
+        },
+      });
 
-  return {
-    applied: true,
-    version: config.version,
-    organizationsCreated: createdOrgs,
-  };
+    return {
+      applied: true,
+      version: config.version,
+      organizationsCreated: createdOrgs,
+    };
+  } finally {
+    await lock.release();
+  }
 }
 
-export async function runEnvTenantBootstrapIfNeeded(): Promise<void> {
+export interface EnvBootstrapStatus {
+  configured: boolean;
+  ok: boolean;
+  version: string | null;
+  applied: boolean;
+  error?: string;
+}
+
+export async function runEnvTenantBootstrapIfNeeded(): Promise<EnvBootstrapStatus> {
   const raw = process.env.TENANT_BOOTSTRAP_CONFIG;
-  if (!raw || !raw.trim()) return;
+  if (!raw || !raw.trim()) {
+    return { configured: false, ok: true, version: null, applied: false };
+  }
   try {
     const trimmed = raw.trim();
     const jsonText = trimmed.startsWith('{')
       ? trimmed
       : Buffer.from(trimmed.replace(/^b64:/, ''), 'base64').toString('utf8');
     const parsed = JSON.parse(jsonText) as TenantBootstrapConfig;
-    await runTenantBootstrapFromConfig(parsed);
+    const res = await runTenantBootstrapFromConfig(parsed);
+    return {
+      configured: true,
+      ok: true,
+      version: res.version,
+      applied: res.applied,
+    };
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     console.error('[tenant-bootstrap] Failed to apply TENANT_BOOTSTRAP_CONFIG:', err);
+    return {
+      configured: true,
+      ok: false,
+      version: null,
+      applied: false,
+      error: detail.replace(/postgres(ql)?:\/\/\S+/gi, '[database-url]').slice(0, 240),
+    };
   }
 }

@@ -13,9 +13,19 @@ import { mapOrgRoleToOperationalRole } from '@/lib/tenant-context';
 export async function POST(request: NextRequest) {
   try {
     const schema = await ensureSaaSColumns();
-    if (!schema.ok && schema.missingTables.includes('users')) {
+    if (!schema.ok) {
       return NextResponse.json(
         { error: schemaHint(schema.missingTables), code: 'SCHEMA_NOT_READY' },
+        { status: 503 }
+      );
+    }
+    if (schema.tenantBootstrap?.configured && !schema.tenantBootstrap.ok) {
+      return NextResponse.json(
+        {
+          error: 'Workspace initialization encountered an error. Please retry in a moment.',
+          detail: schema.tenantBootstrap.error,
+          code: 'BOOTSTRAP_ERROR',
+        },
         { status: 503 }
       );
     }
@@ -75,7 +85,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const isValidPassword = await verifyPassword(password, user.passwordHash);
+    const rawPassword = String(password);
+    let isValidPassword = await verifyPassword(rawPassword, user.passwordHash);
+    if (!isValidPassword && rawPassword.trim() !== rawPassword) {
+      isValidPassword = await verifyPassword(rawPassword.trim(), user.passwordHash);
+    }
     if (!isValidPassword) {
       return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 });
     }

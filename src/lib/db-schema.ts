@@ -7,7 +7,10 @@ import {
   makeStatementIdempotent,
   splitMigrationStatements,
 } from '@/db/migrations-sql';
-import { runEnvTenantBootstrapIfNeeded } from '@/lib/tenant-bootstrap';
+import {
+  runEnvTenantBootstrapIfNeeded,
+  type EnvBootstrapStatus,
+} from '@/lib/tenant-bootstrap';
 
 const CORE_TABLES = [
   'users',
@@ -55,6 +58,9 @@ const STATEMENTS = [
   `ALTER TABLE "practices" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `ALTER TABLE "patients" ADD COLUMN IF NOT EXISTS "organization_id" uuid`,
   `CREATE TABLE IF NOT EXISTS "site_settings" ("key" varchar(100) PRIMARY KEY, "value" jsonb NOT NULL, "updated_by" uuid, "updated_at" timestamp NOT NULL DEFAULT now())`,
+  `ALTER TABLE "site_settings" DROP CONSTRAINT IF EXISTS "site_settings_updated_by_fkey"`,
+  `ALTER TABLE "site_settings" DROP CONSTRAINT IF EXISTS "site_settings_updated_by_users_id_fk"`,
+  `DO $$ BEGIN ALTER TABLE "site_settings" ADD CONSTRAINT "site_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "users"("id") ON DELETE SET NULL; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
   `DROP TABLE IF EXISTS "portal_interactions" CASCADE`,
   `DROP TABLE IF EXISTS "payer_portals" CASCADE`,
 ];
@@ -63,6 +69,7 @@ export interface SchemaStatus {
   ok: boolean;
   missingTables: string[];
   bootstrapped?: boolean;
+  tenantBootstrap?: EnvBootstrapStatus;
 }
 
 async function queryMissingCoreTables(): Promise<string[]> {
@@ -71,6 +78,20 @@ async function queryMissingCoreTables(): Promise<string[]> {
   );
   const present = new Set((rows.rows as { table_name: string }[]).map((r) => r.table_name));
   return CORE_TABLES.filter((t) => !present.has(t));
+}
+
+async function hasMultiTenantSentinel(): Promise<boolean> {
+  try {
+    const colRows = await db.execute(
+      sql`SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='era_transactions' AND column_name='organization_id' LIMIT 1`
+    );
+    const idxRows = await db.execute(
+      sql`SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='denial_codes_global_code_uidx' LIMIT 1`
+    );
+    return colRows.rows.length > 0 && idxRows.rows.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 async function applyMigrationsWithClient(client: PoolClient): Promise<void> {
@@ -146,6 +167,20 @@ async function bootstrapFullSchema(): Promise<void> {
     }
 
     await applyMigrationsWithClient(client);
+
+    // If directUrl pointed to a different database than runtimePool, migrate runtimePool too
+    if (dedicatedPool) {
+      const stillMissing = await queryMissingCoreTables();
+      const sentinelOk = await hasMultiTenantSentinel();
+      if (stillMissing.length > 0 || !sentinelOk) {
+        const rtClient = await runtimePool.connect();
+        try {
+          await applyMigrationsWithClient(rtClient);
+        } finally {
+          rtClient.release();
+        }
+      }
+    }
   } finally {
     if (client) {
       if (locked) {
@@ -161,6 +196,10 @@ async function bootstrapFullSchema(): Promise<void> {
 
 let cached: Promise<SchemaStatus> | null = null;
 
+export function resetSchemaCache(): void {
+  cached = null;
+}
+
 export function ensureSaaSColumns(): Promise<SchemaStatus> {
   if (!cached) {
     cached = (async (): Promise<SchemaStatus> => {
@@ -171,8 +210,13 @@ export function ensureSaaSColumns(): Promise<SchemaStatus> {
         return { ok: false, missingTables: ['<database unreachable>'] };
       }
 
+      let sentinelReady = false;
+      if (missingTables.length === 0) {
+        sentinelReady = await hasMultiTenantSentinel();
+      }
+
       let bootstrapped = false;
-      if (missingTables.length > 0) {
+      if (missingTables.length > 0 || !sentinelReady) {
         try {
           await bootstrapFullSchema();
           missingTables = await queryMissingCoreTables();
@@ -199,18 +243,24 @@ export function ensureSaaSColumns(): Promise<SchemaStatus> {
         }
       }
 
+      let tenantBootstrap: EnvBootstrapStatus | undefined;
       if (missingTables.length === 0) {
-        await runEnvTenantBootstrapIfNeeded();
+        tenantBootstrap = await runEnvTenantBootstrapIfNeeded();
       }
 
-      return { ok: missingTables.length === 0, missingTables, bootstrapped };
+      return {
+        ok: missingTables.length === 0,
+        missingTables,
+        bootstrapped,
+        tenantBootstrap,
+      };
     })();
 
     cached.then((r) => {
-      if (!r.ok) {
+      if (!r.ok || (r.tenantBootstrap?.configured && !r.tenantBootstrap.ok)) {
         setTimeout(() => {
           cached = null;
-        }, 15_000);
+        }, 2_000);
       }
     });
   }

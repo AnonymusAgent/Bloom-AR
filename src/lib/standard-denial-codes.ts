@@ -37,7 +37,7 @@ export async function ensureStandardDenialCodes(): Promise<{ inserted: number; s
   }
 
   if (batch.length > 0) {
-    await db.insert(denialCodes).values(batch);
+    await db.insert(denialCodes).values(batch).onConflictDoNothing();
   }
 
   return { inserted: batch.length, skipped };

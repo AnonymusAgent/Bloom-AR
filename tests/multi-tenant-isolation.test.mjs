@@ -11,7 +11,11 @@ import {
   generateRecoveryCodes,
   hashRecoveryCode,
 } from '../src/lib/mfa.ts';
-import { DRIZZLE_MIGRATIONS } from '../src/db/migrations-sql.ts';
+import {
+  DRIZZLE_MIGRATIONS,
+  makeStatementIdempotent,
+  splitMigrationStatements,
+} from '../src/db/migrations-sql.ts';
 
 const ROOT = process.cwd();
 
@@ -226,3 +230,55 @@ test('PostgreSQL Row-Level Security (RLS) blocks cross-organization reads and wr
     await pg.close();
   }
 });
+
+test('Migration 0006 upgrades site_settings.updated_by FK to ON DELETE SET NULL for legacy purge safety', async (t) => {
+  let PGlite;
+  try {
+    ({ PGlite } = await import('@electric-sql/pglite'));
+  } catch {
+    t.skip('@electric-sql/pglite not installed in environment');
+    return;
+  }
+
+  const pg = new PGlite();
+  try {
+    // 1. Apply migrations 0000..0005 first (legacy production state before 0006)
+    for (const migration of DRIZZLE_MIGRATIONS.slice(0, 6)) {
+      const stmts = splitMigrationStatements(migration.sql).map(makeStatementIdempotent);
+      for (const s of stmts) {
+        if (/CREATE\s+EXTENSION/i.test(s)) continue;
+        await pg.exec(s);
+      }
+    }
+
+    await pg.exec(`
+      INSERT INTO users (id, email, password_hash, first_name, last_name, role, is_active, is_platform_admin)
+      VALUES
+        ('11111111-1111-4111-8111-111111111111', 'legacy-editor@example.invalid', 'hash', 'Legacy', 'Editor', 'administrator', true, false),
+        ('22222222-2222-4222-8222-222222222222', 'platform-owner@example.invalid', 'hash', 'Platform', 'Owner', 'administrator', true, true);
+
+      INSERT INTO site_settings (key, value, updated_by)
+      VALUES ('cms_landing', '{"headline":"Welcome"}'::jsonb, '11111111-1111-4111-8111-111111111111');
+    `);
+
+    // 2. Apply migration 0006
+    const mig0006 = DRIZZLE_MIGRATIONS[6];
+    for (const s of splitMigrationStatements(mig0006.sql).map(makeStatementIdempotent)) {
+      await pg.exec(s);
+    }
+
+    // 3. Deleting non-platform-admin users now succeeds cleanly and nulls site_settings.updated_by
+    await pg.exec(`DELETE FROM users WHERE is_platform_admin = false;`);
+
+    const remainingUsers = await pg.query(`SELECT email, is_platform_admin FROM users`);
+    assert.equal(remainingUsers.rows.length, 1);
+    assert.equal(remainingUsers.rows[0].email, 'platform-owner@example.invalid');
+
+    const cmsRow = await pg.query(`SELECT key, updated_by FROM site_settings WHERE key = 'cms_landing'`);
+    assert.equal(cmsRow.rows.length, 1);
+    assert.equal(cmsRow.rows[0].updated_by, null);
+  } finally {
+    await pg.close();
+  }
+});
+

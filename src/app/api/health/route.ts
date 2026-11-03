@@ -13,15 +13,29 @@ export async function GET() {
       sql`SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name IN ('email_verified_at','is_platform_admin','account_status')`
     );
     const present = (cols.rows as { column_name: string }[]).map((r) => r.column_name);
+    const orgCountRes = schema.ok
+      ? await db.execute(sql`SELECT count(*)::int AS cnt FROM organizations`)
+      : { rows: [{ cnt: 0 }] };
+    const organizationsCount = Number((orgCountRes.rows[0] as { cnt?: number })?.cnt ?? 0);
     return Response.json(
       {
-        ok: schema.ok && present.length === 3,
+        ok:
+          schema.ok &&
+          present.length === 3 &&
+          (!schema.tenantBootstrap?.configured || schema.tenantBootstrap.ok),
         database: 'reachable',
         schema: {
           ready: schema.ok && present.length === 3,
           bootstrapped: Boolean(schema.bootstrapped),
           usersColumnsPresent: present,
           missingTables: schema.missingTables,
+        },
+        workspaces: {
+          organizationsCount,
+          bootstrapConfigured: Boolean(schema.tenantBootstrap?.configured),
+          bootstrapOk: schema.tenantBootstrap ? schema.tenantBootstrap.ok : true,
+          bootstrapVersion: schema.tenantBootstrap?.version ?? null,
+          bootstrapError: schema.tenantBootstrap?.error,
         },
         hint: schema.ok
           ? undefined
